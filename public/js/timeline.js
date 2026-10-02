@@ -1,4 +1,5 @@
 import { S, duration, emit, on, sourceById } from "./state.js";
+import { MIME_DRAG } from "./library.js";
 // api importé plus bas via le module partagé pour garder un seul point d'entrée
 import { $, clamp, api, toast } from "./api.js";
 
@@ -57,20 +58,31 @@ function wireDropZone() {
     for (const lane of document.querySelectorAll(".lane.drop-active")) lane.classList.remove("drop-active");
   };
 
+  // Deux origines possibles : des fichiers du disque, ou un média de la médiathèque.
+  const hasFiles = (e) => Boolean(e.dataTransfer?.types?.includes("Files"));
+  const hasSource = (e) => Boolean(e.dataTransfer?.types?.includes(MIME_DRAG));
+
   host.addEventListener("dragover", (e) => {
-    if (!e.dataTransfer?.types?.includes("Files")) return;
+    if (!hasFiles(e) && !hasSource(e)) return;
     e.preventDefault();
+    if (hasSource(e)) e.dataTransfer.dropEffect = "copy";
     clearHighlights();
     const { lane } = resolveTarget(e);
     if (lane) lane.classList.add("drop-active");
   });
   host.addEventListener("dragleave", clearHighlights);
   host.addEventListener("drop", (e) => {
-    if (!e.dataTransfer?.files?.length) return;
+    if (!hasFiles(e) && !hasSource(e)) return;
     e.preventDefault();
     clearHighlights();
     const { target, trackId, lane } = resolveTarget(e);
     const time = lane ? timeAt(e, lane) : S.playhead;
+    if (hasSource(e)) {
+      const sourceId = e.dataTransfer.getData(MIME_DRAG);
+      if (sourceId) emit("library-add", { sourceId, time, target, trackId });
+      return;
+    }
+    if (!e.dataTransfer?.files?.length) return;
     emit("drop-media", { files: [...e.dataTransfer.files], time, target, trackId });
   });
 }

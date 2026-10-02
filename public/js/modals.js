@@ -382,6 +382,12 @@ export async function openProjects() {
               toast(`Projet « ${project.name} » ouvert`, "ok");
             },
           }),
+          el("a", {
+            class: "btn-like",
+            href: `/api/projects/${p.id}/archive`,
+            title: "Sauvegarder le projet complet (projet + médias) dans un fichier",
+            text: "💾",
+          }),
           el("button", {
             class: "danger",
             text: "🗑️",
@@ -409,8 +415,46 @@ export async function openProjects() {
     closeModal();
   });
 
+  // restauration d'une sauvegarde .tar.gz exportée depuis l'app
+  const archiveInput = el("input", { type: "file", accept: ".gz,.tar,.tgz,application/gzip,application/x-tar", hidden: true });
+  archiveInput.addEventListener("change", async () => {
+    const file = archiveInput.files?.[0];
+    if (!file) return;
+    const note = toast("Restauration de la sauvegarde…", "info", 120000);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/projects/import", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
+      S.project = data.project;
+      emit("project-external", data.project);
+      note.remove();
+      toast(`Projet restauré : ${data.project.name}`, "ok", 6000);
+      closeModal();
+    } catch (e) {
+      note.remove();
+      toast(`Restauration impossible : ${e.message}`, "error", 8000);
+      archiveInput.value = "";
+    }
+  });
+  const importButton = el("button", {
+    text: "📥 Restaurer une sauvegarde",
+    title: "Importer un fichier .tar.gz créé avec le bouton 💾",
+    onclick: () => archiveInput.click(),
+  });
+
   openModal(() =>
-    el("div", {}, [el("h2", { text: "🗂️ Projets" }), createForm, el("div", { class: "divider" }), list, el("div", { class: "footer" }, [el("button", { text: "Fermer", onclick: () => closeModal() })])])
+    el("div", {},
+      [
+        el("h2", { text: "🗂️ Projets" }),
+        createForm,
+        el("div", { class: "divider" }),
+        list,
+        el("div", { class: "muted", style: { fontSize: "11px", marginTop: "10px" }, text: "💾 télécharge une sauvegarde complète (médias inclus) ; 📥 restaure une sauvegarde dans un nouveau projet." }),
+        el("div", { class: "footer" }, [importButton, archiveInput, el("button", { text: "Fermer", onclick: () => closeModal() })]),
+      ]
+    )
   );
 }
 

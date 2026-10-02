@@ -27,6 +27,8 @@
         <div class="progress" style="width: 90px; margin: 0"><div id="jobBar"></div></div>
       </div>
       <div class="topbar-actions">
+        <button id="btnUndo" class="ghost icon" title="Annuler (Ctrl+Z)" disabled>↶</button>
+        <button id="btnRedo" class="ghost icon" title="Rétablir (Ctrl+Shift+Z)" disabled>↷</button>
         <button id="btnRecord" title="Enregistrer au micro">🎙️ Enregistrer</button>
         <button id="btnImport" title="Importer un fichier (audio, vidéo, image)">📁 Importer</button>
         <button id="btnLayoutReset" class="ghost icon" title="Réorganiser les panneaux par défaut">🧩</button>
@@ -135,6 +137,16 @@
       <div class="splitter" data-split="1" title="Glisser pour redimensionner"></div>
 
       <aside class="col-right col" data-col="right">
+        <div class="card library-card" data-panel="library">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🗂️ Médiathèque</span></div>
+            <div class="card-tools">
+              <span class="muted" id="libraryInfo"></span>
+              <button class="ghost" data-collapse title="Replier">▾</button>
+            </div>
+          </div>
+          <div id="library"></div>
+        </div>
         <div class="card side-card" data-panel="side">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🧰 Outils & illustrations</span></div>

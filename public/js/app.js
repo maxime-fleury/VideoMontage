@@ -8,6 +8,8 @@ import { initPanels, renderSidePanel, splitClip } from "./panels.js";
 import { initSubtitles, loadSubtitles, openSubtitlesModal, updateSubtitleOverlay } from "./subtitles.js";
 import { openRecorder, openExport, openSettings, openProjects, openAuto } from "./modals.js";
 import { initLayout } from "./layout.js";
+import { initLibrary, renderLibrary } from "./library.js";
+import { initHistory } from "./history.js";
 
 export const player = new Player();
 let stage = null;
@@ -23,6 +25,8 @@ async function boot() {
   initTranscript();
   initPanels();
   initSubtitles();
+  initLibrary();
+  initHistory();
   stage = new Stage($("#stage"));
   wireButtons();
   wireEvents();
@@ -371,21 +375,51 @@ function renderToolOptions() {
   if (!toolMode) return;
 
   if (toolMode === "silence") {
+    // Seuil « auto » : mesuré sur le plancher de bruit réel de la prise (voir /voice/detect).
+    const autoBox = el("input", { type: "checkbox", checked: true });
+    const auto = el("label", { class: "opt", title: "Mesure le bruit de fond de la prise pour choisir le seuil" }, [
+      autoBox,
+      el("span", { text: "Seuil auto" }),
+    ]);
     const threshold = rangeOpt("Seuil", -60, -20, 1, -35, "dB");
+    threshold.node.title = "Utilisé seulement si « Seuil auto » est décoché";
     const minDur = rangeOpt("Durée mini", 0.15, 1.5, 0.05, 0.35, "s");
     const factor = rangeOpt("Facteur", 2, 100, 1, 100, "×");
     const info = el("span", { class: "muted", style: { fontSize: "11px" } });
-    const detect = el("button", { text: "🔍 Détecter", onclick: async () => {
-      const data = await api(`/api/projects/${S.project.id}/voice/detect`, { method: "POST", body: { thresholdDb: threshold.value, minDuration: minDur.value } });
-      S.detected = data.inOut;
-      emit("render");
-      info.textContent = `${data.silences.length} silences · ${data.total.toFixed(1)} s → ${data.savedAtX100.toFixed(1)} s gagnées à ×${factor.value}`;
+    const syncThreshold = () => {
+      threshold.node.querySelector("input").disabled = autoBox.checked;
+      threshold.node.style.opacity = autoBox.checked ? "0.5" : "1";
+    };
+    autoBox.addEventListener("change", syncThreshold);
+    syncThreshold();
+
+    const detect = el("button", { text: "🔍 Analyser", onclick: async () => {
+      info.textContent = "Analyse du plancher de bruit…";
+      try {
+        const data = await api(`/api/projects/${S.project.id}/voice/detect`, {
+          method: "POST",
+          body: { thresholdDb: autoBox.checked ? "auto" : threshold.get(), minDuration: minDur.get() },
+        });
+        S.detected = data.inOut;
+        emit("render");
+        const noise = data.analysis
+          ? ` · seuil auto ${data.thresholdDb} dB (plancher ${data.analysis.noiseFloorDb} dB)`
+          : ` · seuil manuel ${data.thresholdDb} dB`;
+        info.textContent = `${data.silences.length} silences · ${data.total.toFixed(1)} s → ${data.savedAtX100.toFixed(1)} s gagnées à ×${factor.get()}${noise}`;
+      } catch (e) {
+        info.textContent = `Analyse impossible : ${e.message}`;
+      }
     }});
     const apply = el("button", { class: "primary", text: "⏩ Appliquer", onclick: async () => {
       await voiceOp("Accélération des silences…", () =>
         api(`/api/projects/${S.project.id}/voice/ffwd`, {
           method: "POST",
-          body: { enabled: true, thresholdDb: Number(threshold.value), minDuration: Number(minDur.value), factor: Number(factor.value) },
+          body: {
+            enabled: true,
+            thresholdDb: autoBox.checked ? "auto" : threshold.get(),
+            minDuration: minDur.get(),
+            factor: factor.get(),
+          },
         })
       );
       S.detected = null;
@@ -394,7 +428,7 @@ function renderToolOptions() {
       await voiceOp("Retour à la normale…", () => api(`/api/projects/${S.project.id}/voice/ffwd`, { method: "POST", body: { enabled: false } }));
       S.detected = null;
     }});
-    host.append(threshold.node, minDur.node, factor.node, detect, apply, undo, info);
+    host.append(auto, threshold.node, minDur.node, factor.node, detect, apply, undo, info);
     return;
   }
 
@@ -418,7 +452,7 @@ function renderToolOptions() {
         const data = await voiceOp("Analyse du bruit de fond…", () =>
           api(`/api/projects/${S.project.id}/voice/denoise`, {
             method: "POST",
-            body: { mode: "profile", reduction: Number(reduction.value), sample: S.selection },
+            body: { mode: "profile", reduction: reduction.get(), sample: S.selection },
           })
         );
         if (data?.measured) toast(`Bruit de fond mesuré : ${data.measured.rmsDb} dB — réduction appliquée`, "ok", 7000);
@@ -431,7 +465,7 @@ function renderToolOptions() {
           method: "POST",
           body: {
             mode: mode.value,
-            reduction: Number(reduction.value),
+            reduction: reduction.get(),
             sample: mode.value === "profile" ? S.selection : null,
           },
         })

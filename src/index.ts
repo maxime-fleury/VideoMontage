@@ -39,6 +39,7 @@ import {
   type VideoClip,
 } from "./lib/store";
 import {
+  analyzeNoiseFloor,
   buildSegments,
   compileVoice,
   detectSilences,
@@ -48,6 +49,7 @@ import {
   mergeRanges,
   probe,
   renderMontage,
+  type NoiseAnalysis,
 } from "./lib/ffmpeg";
 import { installRnnoise, installWhisper, transcribe, whisperStatus } from "./lib/whisper";
 import { downloadImage, proxyImage, searchImages } from "./lib/images";
@@ -57,6 +59,20 @@ import { FONTS_DIR, FONT_TTF_DIR, installFont, installRecommendedFonts, listFont
 import { defaultEffect } from "./lib/store";
 
 const NAME = "Montage Video";
+
+/**
+ * Détermine le seuil de silence à utiliser : mesure du plancher de bruit si « auto »
+ * (ou rien) est demandé, sinon valeur manuelle bornée.
+ */
+async function resolveSilenceThreshold(
+  file: string,
+  requested?: number | "auto"
+): Promise<{ thresholdDb: number; auto: boolean; noise: NoiseAnalysis | null }> {
+  const auto = requested === undefined || requested === null || requested === ("auto" as unknown);
+  if (!auto) return { thresholdDb: clamp(Number(requested), -80, -10), auto: false, noise: null };
+  const noise = await analyzeNoiseFloor(file);
+  return { thresholdDb: noise.suggestedThresholdDb, auto: true, noise };
+}
 const MIN_PORT = 3000;
 const MAX_PORT = 3600;
 const PUBLIC_DIR = "public";
@@ -424,6 +440,65 @@ async function handleApi(req: Request, parts: string[], url: URL): Promise<Respo
     return json({ project: serialize(project) });
   }
 
+  // /api/projects/import  (restaure une archive .tar.gz exportée depuis l'app)
+  if (a === "projects" && b === "import" && method === "POST") {
+    const form = await req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) return badRequest("Archive manquante");
+    const raw = new Uint8Array(await file.arrayBuffer());
+    if (!raw.length) return badRequest("Archive vide");
+    let data = raw;
+    if (raw[0] === 0x1f && raw[1] === 0x8b) {
+      try {
+        data = new Uint8Array(Bun.gunzipSync(raw));
+      } catch (e) {
+        return badRequest(`Archive illisible : ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    let entries: Map<string, Blob>;
+    try {
+      entries = await new Bun.Archive(data).files();
+    } catch (e) {
+      return badRequest(`Archive illisible : ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const projectFile = entries.get("project.json");
+    if (!projectFile) return badRequest("Cette archive ne contient pas de projet");
+    let imported: Project;
+    try {
+      imported = JSON.parse(await projectFile.text()) as Project;
+    } catch {
+      return badRequest("project.json illisible dans l'archive");
+    }
+
+    const id = newId("prj");
+    const dir = projectDir(id);
+    await ensureProjectDirs(id);
+    await ensureDir(mediaDir(id), buildDir(id));
+    for (const [name, blob] of entries) {
+      // on n'extrait que les dossiers connus, sans traversée de chemin
+      const bits = name.split("/");
+      if (bits.length !== 2) continue;
+      const [folder, fileName] = bits;
+      if (folder !== "media" && folder !== "build") continue;
+      if (!fileName || fileName.includes("..")) continue;
+      const target = folder === "media" ? mediaDir(id) : buildDir(id);
+      await Bun.write(`${target}/${path.basename(fileName)}`, blob);
+    }
+
+    const project: Project = {
+      ...imported,
+      id,
+      name: `${sanitizeText(imported.name || "Projet", "Projet")} (importé)`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      voice: { ...imported.voice, build: imported.voice?.build ? { ...imported.voice.build, builtAt: Date.now() } : undefined },
+    };
+    await saveProject(project);
+    return json({ project: serialize(project) });
+  }
+
   if (!b) return badRequest("Projet manquant");
 
   const project = await getProject(b);
@@ -497,8 +572,51 @@ async function handleApi(req: Request, parts: string[], url: URL): Promise<Respo
           })),
       }));
     }
+    if (body.transcript === null || body.transcript === undefined) {
+      if (body.transcript === null) project.transcript = undefined;
+    } else {
+      project.transcript = body.transcript;
+    }
+    if (body.voice) {
+      project.voice = {
+        ...project.voice,
+        ...body.voice,
+        edits: { ...project.voice.edits, ...(body.voice.edits || {}) },
+      };
+    }
     await saveProject(project);
+    // l'état voix (coupes, silences, débruitage) impose de reconstruire la piste
+    if (body.voice) {
+      const warnings: string[] = [];
+      await recompile(project, warnings);
+      await saveProject(project);
+      return json({ project: serialize(project), warnings });
+    }
     return json({ project: serialize(project) });
+  }
+
+  // /api/projects/:id/archive  (sauvegarde complète: projet + médias + voix)
+  if (c === "archive" && method === "GET") {
+    const files: Record<string, Uint8Array | string> = {};
+    files["project.json"] = await Bun.file(`${projectDir(pid)}/project.json`).text();
+    for (const name of await fs.readdir(mediaDir(pid)).catch(() => [])) {
+      const file = Bun.file(`${mediaDir(pid)}/${name}`);
+      files[`media/${name}`] = new Uint8Array(await file.arrayBuffer());
+    }
+    for (const name of ["voice.mp3", "voice16k.wav"]) {
+      const file = Bun.file(`${buildDir(pid)}/${name}`);
+      if (await file.exists()) files[`build/${name}`] = new Uint8Array(await file.arrayBuffer());
+    }
+    const raw = await new Bun.Archive(files).bytes();
+    const gz = Bun.gzipSync(raw);
+    const archiveName = `${slug(project.name || "montage")}.tar.gz`;
+    return new Response(gz, {
+      headers: {
+        "content-type": "application/gzip",
+        "content-disposition": `attachment; filename="${archiveName}"`,
+        "content-length": String(gz.length),
+      },
+    });
   }
 
   // /api/projects/:id/upload  (multipart)
@@ -584,10 +702,11 @@ async function handleApi(req: Request, parts: string[], url: URL): Promise<Respo
     }
 
     if (d === "detect" && method === "POST") {
-      const body = await readBody<{ thresholdDb?: number; minDuration?: number }>(req);
+      const body = await readBody<{ thresholdDb?: number | "auto"; minDuration?: number }>(req);
       const source = project.sources.find((s) => s.id === project.voice.sourceId);
       if (!source) return badRequest("Aucune piste voix");
-      const thresholdDb = clamp(Number(body.thresholdDb ?? -35), -80, -10);
+      const analysis = await resolveSilenceThreshold(sourcePath(pid, source), body.thresholdDb);
+      const thresholdDb = analysis.thresholdDb;
       const minDuration = clamp(Number(body.minDuration ?? 0.35), 0.1, 5);
       const silences = source.duration
         ? await detectSilences(sourcePath(pid, source), thresholdDb, minDuration)
@@ -612,13 +731,19 @@ async function handleApi(req: Request, parts: string[], url: URL): Promise<Respo
         inOut,
         total: silences.reduce((acc, s) => acc + (s.end - s.start), 0),
         savedAtX100: silences.reduce((acc, s) => acc + (s.end - s.start) * (1 - 1 / project.voice.edits.ffwdFactor), 0),
+        thresholdDb,
+        auto: analysis.auto,
+        analysis: analysis.noise,
       });
     }
 
     if (d === "ffwd" && method === "POST") {
-      const body = await readBody<{ enabled?: boolean; thresholdDb?: number; minDuration?: number; factor?: number }>(
-        req
-      );
+      const body = await readBody<{
+        enabled?: boolean;
+        thresholdDb?: number | "auto";
+        minDuration?: number;
+        factor?: number;
+      }>(req);
       const source = project.sources.find((s) => s.id === project.voice.sourceId);
       if (!source) return badRequest("Aucune piste voix");
       const factor = clamp(Number(body.factor ?? project.voice.edits.ffwdFactor ?? 100), 2, 100);
@@ -626,7 +751,8 @@ async function handleApi(req: Request, parts: string[], url: URL): Promise<Respo
       if (body.enabled === false) {
         project.voice.edits.ffwd = [];
       } else {
-        const thresholdDb = clamp(Number(body.thresholdDb ?? -35), -80, -10);
+        // même seuil (auto ou manuel) que celui affiché par la prévisualisation
+        const { thresholdDb } = await resolveSilenceThreshold(sourcePath(pid, source), body.thresholdDb);
         const minDuration = clamp(Number(body.minDuration ?? 0.35), 0.1, 5);
         const silences = await detectSilences(sourcePath(pid, source), thresholdDb, minDuration);
         project.voice.edits.ffwd = mergeRanges(silences);

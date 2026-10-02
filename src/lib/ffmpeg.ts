@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { FFMPEG, FFPROBE, buildDir, commandExists, ensureDir, run, runSync } from "./util";
-import type { AudioTrack, Denoise, Project, Range, Segment, VideoClip, VoiceBuild, VoiceEdits } from "./store";
+import crypto from "node:crypto";
+import { FFMPEG, FFPROBE, buildDir, clamp, commandExists, ensureDir, run, runSync } from "./util";
+import type { AudioTrack, Denoise, Project, Range, Segment, Source, VideoClip, VoiceBuild, VoiceEdits } from "./store";
 import { sourceById, sourcePath } from "./store";
 import { writeSubtitles } from "./subtitles";
 import { FONTS_DIR } from "./fonts";
@@ -91,6 +92,77 @@ export async function detectSilences(
   return silences.map((s) => ({ start: s.start + pad, end: Math.max(s.start + pad, s.end - pad) }));
 }
 
+export type NoiseAnalysis = {
+  /** niveau des passages les plus calmes (15e centile) */
+  noiseFloorDb: number;
+  /** niveau parlé haut (95e centile) */
+  speechDb: number;
+  /** seuil de silence proposé, déduit du plancher de bruit */
+  suggestedThresholdDb: number;
+  windows: number;
+};
+
+const noiseCache = new Map<string, { key: string; value: NoiseAnalysis }>();
+
+/**
+ * Mesure le plancher de bruit réel de la voix (RMS par fenêtre) pour choisir un seuil
+ * de silence adapté, plutôt qu'un −35 dB fixe qui rate les prises bruyantes ou coupe
+ * les respirations d'une prise très propre.
+ */
+export async function analyzeNoiseFloor(
+  file: string,
+  windowSeconds = 0.4,
+  thresholdOffset = 6
+): Promise<NoiseAnalysis> {
+  const stat = await fs.stat(file).catch(() => null);
+  const cacheKey = `${file}:${stat?.size ?? 0}:${stat ? Math.round(stat.mtimeMs) : 0}`;
+  const cached = noiseCache.get(file);
+  if (cached && cached.key === cacheKey) return cached.value;
+
+  const sampleRate = 16000;
+  const windowSamples = Math.max(400, Math.round(sampleRate * windowSeconds));
+  const res = await run([
+    FFMPEG,
+    "-hide_banner",
+    "-nostdin",
+    "-i",
+    file,
+    "-af",
+    `aresample=${sampleRate},asetnsamples=n=${windowSamples},astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level`,
+    "-f",
+    "null",
+    "-",
+  ]);
+
+  const levels: number[] = [];
+  for (const m of res.stderr.matchAll(/RMS_level=([-\d.]+|[-\w]*inf)/gi)) {
+    const raw = m[1];
+    if (/inf/i.test(raw)) {
+      levels.push(-90);
+      continue;
+    }
+    const value = Number(raw);
+    if (Number.isFinite(value)) levels.push(value);
+  }
+
+  const round1 = (v: number) => Math.round(v * 10) / 10;
+  if (levels.length < 3) {
+    const fallback: NoiseAnalysis = { noiseFloorDb: -50, speechDb: -6, suggestedThresholdDb: -35, windows: levels.length };
+    return fallback;
+  }
+  const sorted = [...levels].sort((a, b) => a - b);
+  const pick = (q: number) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * q)))];
+  const noiseFloorDb = pick(0.15);
+  const value: NoiseAnalysis = {
+    noiseFloorDb: round1(noiseFloorDb),
+    speechDb: round1(pick(0.95)),
+    suggestedThresholdDb: round1(clamp(noiseFloorDb + thresholdOffset, -55, -22)),
+    windows: levels.length,
+  };
+  noiseCache.set(file, { key: cacheKey, value });
+  return value;
+}
+
 /** Mesure RMS/peak d'une zone (pour le profil de bruit). */
 export async function measureRegion(file: string, range: Range): Promise<{ rmsDb: number; peakDb: number }> {
   const res = await run([
@@ -128,10 +200,17 @@ export function buildSegments(edits: VoiceEdits, duration: number): Segment[] {
   ffwd = subtractRanges(ffwd, cuts);
 
   const tempo = Math.max(1.5, Math.min(100, edits.ffwdFactor || 100));
+  // Les bornes d'édition sont arrondies à la milliseconde : les intervalles et les
+  // tests d'appartenance doivent utiliser EXACTEMENT les mêmes valeurs, sinon un
+  // silence n'est pas reconnu comme « dans » son propre intervalle (et n'est pas accéléré).
+  const round4 = (v: number) => Number(v.toFixed(4));
+  const cutsR = cuts.map((c) => ({ start: round4(c.start), end: round4(c.end) }));
+  const ffwdR = ffwd.map((f) => ({ start: round4(f.start), end: round4(f.end) }));
+  const EPS = 1e-4;
   const edges = new Set<number>([0, duration]);
-  for (const r of [...cuts, ...ffwd]) {
-    edges.add(Number(r.start.toFixed(4)));
-    edges.add(Number(r.end.toFixed(4)));
+  for (const r of [...cutsR, ...ffwdR]) {
+    edges.add(r.start);
+    edges.add(r.end);
   }
   const sorted = [...edges].sort((a, b) => a - b);
   const segments: Segment[] = [];
@@ -140,9 +219,9 @@ export function buildSegments(edits: VoiceEdits, duration: number): Segment[] {
     const start = sorted[i];
     const end = sorted[i + 1];
     if (end - start < 0.001) continue;
-    const isCut = cuts.some((c) => c.start <= start + 1e-6 && c.end >= end - 1e-6);
+    const isCut = cutsR.some((c) => c.start <= start + EPS && c.end >= end - EPS);
     if (isCut) continue;
-    const isFast = ffwd.some((f) => f.start <= start + 1e-6 && f.end >= end - 1e-6);
+    const isFast = ffwdR.some((f) => f.start <= start + EPS && f.end >= end - EPS);
     const t = isFast ? tempo : 1;
     const outDur = (end - start) / t;
     segments.push({ srcStart: start, srcEnd: end, tempo: t, outStart: out, outEnd: out + outDur });
@@ -421,10 +500,11 @@ export async function compileVoice(
 // Rendu final
 // ---------------------------------------------------------------------------
 
-function clipFilter(
+/** Partie « spatiale » du traitement d'un clip : taille, cadrage, mouvements de zoom.
+ *  C'est la partie coûteuse (zoompan en 1080p) et elle ne dépend ni du temps de la
+ *  timeline ni des fondus → elle est mise en cache par clip. */
+function clipSpatialFilters(
   clip: VideoClip,
-  index: number,
-  inputIndex: number,
   renderedDuration: number,
   out: { width: number; height: number; fps: number }
 ) {
@@ -432,12 +512,10 @@ function clipFilter(
   const dur = Math.max(0.05, renderedDuration);
   const transition = clip.effect?.transition?.type || "cut";
   const transDur = Math.max(0, clip.effect?.transition?.duration ?? 0);
-  const reveal = transDur > 0.05 && ["dissolve", "slide-left", "slide-right", "slide-up", "slide-down", "zoom-in"].includes(transition);
-  // les fondus d'entrée/sortie "noir" restent utilisables seuls
-  const fadeIn = Math.max(0, Math.min(clip.effect.fadeIn, dur / 2));
-  const fadeOut = Math.max(0, Math.min(clip.effect.fadeOut, dur / 2));
-  const parts = [
-    `[${inputIndex}:v]scale=${W}:${H}:force_original_aspect_ratio=decrease`,
+  const reveal =
+    transDur > 0.05 && ["dissolve", "slide-left", "slide-right", "slide-up", "slide-down", "zoom-in"].includes(transition);
+  const filters = [
+    `scale=${W}:${H}:force_original_aspect_ratio=decrease`,
     `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black`,
     "setsar=1",
     `fps=${fps}`,
@@ -446,26 +524,140 @@ function clipFilter(
     const z0 = clip.effect.zoomFrom || 1;
     const z1 = clip.effect.zoomTo || 1.12;
     const frames = Math.max(2, Math.round(dur * fps));
-    parts.push(
+    filters.push(
       `zoompan=z='${z0}+(${z1}-${z0})*on/${frames}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}:fps=${fps}`
     );
   }
   if (transition === "zoom-in" && reveal) {
     const frames = Math.max(2, Math.round(transDur * fps));
-    parts.push(
+    filters.push(
       `zoompan=z='if(lt(on,${frames}),${(1.12).toFixed(3)}-${(0.12).toFixed(3)}*on/${frames},1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}:fps=${fps}`
     );
   }
+  return filters;
+}
+
+/** Partie « temporelle » : fondus, transparence de transition et position sur la timeline.
+ *  Peu coûteuse, elle est appliquée à l'assemblage (elle dépend des voisins et des coupes). */
+function clipTimelineFilters(clip: VideoClip, renderedDuration: number): string[] {
+  const dur = Math.max(0.05, renderedDuration);
+  const transition = clip.effect?.transition?.type || "cut";
+  const transDur = Math.max(0, clip.effect?.transition?.duration ?? 0);
+  const reveal =
+    transDur > 0.05 && ["dissolve", "slide-left", "slide-right", "slide-up", "slide-down", "zoom-in"].includes(transition);
+  // les fondus d'entrée/sortie "noir" restent utilisables seuls
+  const fadeIn = Math.max(0, Math.min(clip.effect.fadeIn, dur / 2));
+  const fadeOut = Math.max(0, Math.min(clip.effect.fadeOut, dur / 2));
+  const filters: string[] = [];
   if (reveal) {
     // fusion progressive sur le clip précédent (nécessite l'alpha)
-    parts.push("format=rgba");
-    parts.push(`fade=t=in:st=0:d=${transDur.toFixed(3)}:alpha=1`);
-  } else {
-    if (fadeIn > 0.01) parts.push(`fade=t=in:st=0:d=${fadeIn.toFixed(3)}`);
+    filters.push("format=rgba");
+    filters.push(`fade=t=in:st=0:d=${transDur.toFixed(3)}:alpha=1`);
+  } else if (fadeIn > 0.01) {
+    filters.push(`fade=t=in:st=0:d=${fadeIn.toFixed(3)}`);
   }
-  if (fadeOut > 0.01) parts.push(`fade=t=out:st=${(dur - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}`);
-  parts.push(`setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB`);
-  return `${parts.join(",")}[clip${index}]`;
+  if (fadeOut > 0.01) filters.push(`fade=t=out:st=${(dur - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}`);
+  filters.push(`setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB`);
+  return filters;
+}
+
+function clipFilter(
+  clip: VideoClip,
+  index: number,
+  inputIndex: number,
+  renderedDuration: number,
+  out: { width: number; height: number; fps: number }
+) {
+  const parts = [
+    ...clipSpatialFilters(clip, renderedDuration, out),
+    ...clipTimelineFilters(clip, renderedDuration),
+  ];
+  return `[${inputIndex}:v]${parts.join(",")}[clip${index}]`;
+}
+
+/** Version du cache : à incrémenter si le rendu d'un clip change. */
+const CLIP_CACHE_VERSION = 1;
+const CLIP_CACHE_MAX_AGE_MS = 21 * 24 * 3600 * 1000;
+
+/** Clé de cache d'un clip : tout ce qui influence son image, sans ce qui dépend des voisins. */
+async function clipCacheKey(
+  project: Project,
+  clip: VideoClip,
+  renderedDuration: number,
+  source: Source,
+  out: { width: number; height: number; fps: number }
+) {
+  const stat = await fs.stat(sourcePath(project.id, source)).catch(() => null);
+  const transition = clip.effect?.transition;
+  const payload = {
+    v: CLIP_CACHE_VERSION,
+    file: source.file,
+    size: stat?.size ?? 0,
+    mtime: stat ? Math.round(stat.mtimeMs) : 0,
+    kind: source.kind,
+    offset: Number((clip.offset || 0).toFixed(3)),
+    duration: Number(renderedDuration.toFixed(3)),
+    kenBurns: clip.effect?.kenBurns ? [clip.effect.zoomFrom ?? 1, clip.effect.zoomTo ?? 1.12] : null,
+    zoomIn: transition?.type === "zoom-in" ? Number((transition.duration || 0).toFixed(3)) : null,
+    size_px: [out.width, out.height, out.fps],
+  };
+  return crypto.createHash("sha1").update(JSON.stringify(payload)).digest("hex").slice(0, 20);
+}
+
+/** Rend un clip en petit MP4 réutilisable (partie spatiale uniquement, sans audio). */
+async function renderClipCache(
+  project: Project,
+  clip: VideoClip,
+  renderedDuration: number,
+  source: Source,
+  out: { width: number; height: number; fps: number },
+  target: string
+): Promise<boolean> {
+  const file = path.resolve(sourcePath(project.id, source));
+  const argv = ["-hide_banner", "-nostdin", "-y", "-v", "error"];
+  if (source.kind === "video") {
+    argv.push("-ss", Math.max(0, clip.offset).toFixed(3), "-t", renderedDuration.toFixed(3), "-i", file);
+  } else {
+    argv.push("-loop", "1", "-framerate", String(out.fps), "-t", renderedDuration.toFixed(3), "-i", file);
+  }
+  argv.push(
+    "-filter_complex",
+    `[0:v]${clipSpatialFilters(clip, renderedDuration, out).join(",")}[v]`,
+    "-map",
+    "[v]",
+    "-an",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "14",
+    "-pix_fmt",
+    "yuv420p",
+    "-r",
+    String(out.fps),
+    "-movflags",
+    "+faststart",
+    target
+  );
+  const res = await run([FFMPEG, ...argv]);
+  if (res.code !== 0) {
+    console.warn(`⚠️  cache de clip impossible (${source.file}) : ${res.stderr.slice(-300)}`);
+    await fs.rm(target, { force: true }).catch(() => {});
+    return false;
+  }
+  return true;
+}
+
+/** Supprime les caches de clips trop anciens (les exports suivants les recréent). */
+async function cleanupClipCache(dir: string) {
+  const files = await fs.readdir(dir).catch(() => []);
+  const now = Date.now();
+  for (const name of files) {
+    if (!name.endsWith(".mp4")) continue;
+    const stat = await fs.stat(`${dir}/${name}`).catch(() => null);
+    if (stat && now - stat.mtimeMs > CLIP_CACHE_MAX_AGE_MS) await fs.rm(`${dir}/${name}`, { force: true }).catch(() => {});
+  }
 }
 
 /** Expression de position de l'overlay pour les transitions glissées. */
@@ -542,13 +734,49 @@ export async function renderMontage(
     previous.duration = Math.min(Math.max(previous.duration, needed), maxDuration);
   }
 
-  const inputs: { kind: "clip" | "voice" | "audio"; index: number; clip?: VideoClip; track?: AudioTrack; audioClip?: any }[] = [];
+  const inputs: {
+    kind: "clip" | "voice" | "audio";
+    index: number;
+    clip?: VideoClip;
+    track?: AudioTrack;
+    audioClip?: any;
+    cached?: boolean;
+  }[] = [];
   let inputIndex = 1;
+
+  // Cache par clip : la partie spatiale (recadrage, zoom) est réutilisée d'un export
+  // à l'autre tant que le clip ne change pas → les ré-exports sont bien plus rapides.
+  const cacheDir = `${buildDir(project.id)}/cache`;
+  await ensureDir(cacheDir);
+  await cleanupClipCache(cacheDir);
+  const cachePaths = new Map<string, string>();
+  let prepared = 0;
+  for (const entry of rendered) {
+    const source = sourceById(project, entry.clip.sourceId);
+    if (!source) continue;
+    const key = await clipCacheKey(project, entry.clip, entry.duration, source, { width: W, height: H, fps });
+    const target = `${cacheDir}/${key}.mp4`;
+    if (await Bun.file(target).exists()) {
+      cachePaths.set(entry.clip.id, target);
+      continue;
+    }
+    onProgress?.(0.02, `Préparation des clips ${prepared + 1}/${rendered.length}…`);
+    if (await renderClipCache(project, entry.clip, entry.duration, source, { width: W, height: H, fps }, target)) {
+      cachePaths.set(entry.clip.id, target);
+    }
+    prepared++;
+  }
 
   for (const entry of rendered) {
     const clip = entry.clip;
     const source = sourceById(project, clip.sourceId);
     if (!source) continue;
+    const cached = cachePaths.get(clip.id);
+    if (cached) {
+      argv.push("-i", abs(cached));
+      inputs.push({ kind: "clip", index: inputIndex++, clip, cached: true });
+      continue;
+    }
     const file = abs(sourcePath(project.id, source));
     if (source.kind === "video") {
       argv.push("-ss", Math.max(0, clip.offset).toFixed(3), "-t", entry.duration.toFixed(3), "-i", file);
@@ -585,7 +813,12 @@ export async function renderMontage(
     if (input.kind !== "clip" || !input.clip) return;
     const entry = rendered.find((r) => r.clip === input.clip);
     const clipDuration = entry ? entry.duration : input.clip.duration;
-    filters.push(clipFilter(input.clip, i, input.index, clipDuration, { width: W, height: H, fps }));
+    filters.push(
+      input.cached
+        ? // segment déjà recadré/zoomé : il ne reste que les fondus et le placement
+          `[${input.index}:v]${clipTimelineFilters(input.clip, clipDuration).join(",")}[clip${i}]`
+        : clipFilter(input.clip, i, input.index, clipDuration, { width: W, height: H, fps })
+    );
     const outLabel = `v${vIndex}`;
     filters.push(
       `[${lastVideo}][clip${i}]overlay=${overlayPosition(input.clip)}:eof_action=pass:shortest=0[${outLabel}]`
@@ -638,7 +871,9 @@ export async function renderMontage(
     );
   }
 
-  const outName = opts.fileName ? sanitizeFileName(opts.fileName) : `montage-${project.id}.mp4`;
+  let outName = opts.fileName ? sanitizeFileName(opts.fileName) : `montage-${project.id}.mp4`;
+  // sans extension, ffmpeg ne sait pas quel format produire
+  if (!/\.(mp4|mov|mkv|webm)$/i.test(outName)) outName += ".mp4";
   const outPath = abs(`${buildDir(project.id)}/${outName}`);
   argv.push(
     "-filter_complex",
