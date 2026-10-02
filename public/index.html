@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Montage Video</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">🎬 <span>Montage Video</span></div>
+      <button class="project-pill" id="projectPill" title="Changer de projet">
+        <span id="projectName">Aucun projet</span>
+        <span class="pill-sub" id="projectSub"></span>
+      </button>
+      <nav class="steps" id="steps">
+        <span class="step" data-step="1">1·Voix</span>
+        <span class="step" data-step="2">2·Nettoyage</span>
+        <span class="step" data-step="3">3·Transcription</span>
+        <span class="step" data-step="4">4·Illustration</span>
+        <span class="step" data-step="5">5·Export</span>
+      </nav>
+      <div class="job-status" id="jobStatus" hidden>
+        <span class="spinner"></span>
+        <span id="jobText" class="muted"></span>
+        <div class="progress" style="width: 90px; margin: 0"><div id="jobBar"></div></div>
+      </div>
+      <div class="topbar-actions">
+        <button id="btnRecord" title="Enregistrer au micro">🎙️ Enregistrer</button>
+        <button id="btnImport" title="Importer un fichier (audio, vidéo, image)">📁 Importer</button>
+        <button id="btnLayoutReset" class="ghost icon" title="Réorganiser les panneaux par défaut">🧩</button>
+        <button id="btnSettings" class="ghost icon" title="Réglages Whisper / RNNoise / polices">⚙️</button>
+        <button id="btnExport" class="primary" title="Rendu final MP4">🎬 Exporter</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="col-left col" data-col="left">
+        <div class="card preview-card" data-panel="preview">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🎬 Aperçu</span></div>
+            <div class="card-tools"><button class="ghost" data-collapse title="Replier">▾</button></div>
+          </div>
+          <div class="stage" id="stage">
+            <div class="stage-empty" id="stageEmpty">
+              <p>Glisse une image ici, ou lance le <b>montage auto</b> 🪄</p>
+            </div>
+          </div>
+          <div class="transport">
+            <button id="btnPlay" class="round" title="Lecture / pause (espace)">▶</button>
+            <button id="btnStop" class="round ghost" title="Stop">⏹</button>
+            <span class="time"><b id="timeNow">0:00.0</b> / <span id="timeTotal">0:00.0</span></span>
+            <input type="range" id="seek" min="0" max="0" step="0.01" value="0" />
+            <div class="zoom">
+              <button id="zoomOut" class="ghost" title="Dézoomer">−</button>
+              <span id="zoomLabel">50 px/s</span>
+              <button id="zoomIn" class="ghost" title="Zoomer">+</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card voice-card" data-panel="voice">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🎙️ Piste voix</span><span class="levels" id="levels"></span></div>
+            <div class="card-tools"><button class="ghost" data-collapse title="Replier">▾</button></div>
+          </div>
+          <div class="toolbar" id="voiceToolbar">
+            <button id="btnCut" title="Couper : clip sélectionné, ou sélection de la voix (C)">✂️ Couper</button>
+            <button id="btnSilence" title="Accélérer les silences ×100">⏩ Silences ×100</button>
+            <button id="btnDenoise" title="Analyser un blanc et débruiter">🔊 Débruiter</button>
+            <button id="btnTranscribe" title="Timecoder avec Whisper (T)">🗣️ Transcrire</button>
+            <button id="btnSubtitles" title="Sous-titres : police, couleurs, animations">💬 Sous-titres</button>
+            <button id="btnAuto" title="Montage automatique depuis les mots-clés">🪄 Montage auto</button>
+            <button id="btnReset" class="ghost" title="Annuler tous les traitements">↺ Réinitialiser</button>
+          </div>
+          <div class="tool-options hidden" id="toolOptions"></div>
+          <div class="wave-wrap" id="waveWrap">
+            <canvas id="waveform"></canvas>
+            <div class="wave-empty" id="waveEmpty">Enregistre ta voix ou importe un fichier audio pour commencer.</div>
+          </div>
+          <div class="hint" id="waveHint">Clic = positionner · Glisser = sélectionner · <b>C</b> coupe · <b>Suppr</b> retire la sélection</div>
+        </div>
+      </section>
+
+      <div class="splitter" data-split="0" title="Glisser pour redimensionner"></div>
+
+      <section class="col-center col" data-col="center">
+        <div class="card timeline-card" data-panel="timeline">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🖼️ Timeline du montage</span></div>
+            <div class="card-tools">
+              <span class="muted" id="timelineInfo"></span>
+              <button class="ghost" data-collapse title="Replier">▾</button>
+            </div>
+          </div>
+          <div class="timeline-scroll" id="timelineScroll">
+            <div class="timeline" id="timeline">
+              <div class="labels">
+                <div class="label-row ruler-label">Temps</div>
+                <div class="label-row">Vidéo</div>
+                <div class="label-row">Voix</div>
+                <div id="trackLabels"></div>
+              </div>
+              <div class="lanes" id="lanes">
+                <div class="lane ruler" id="ruler"></div>
+                <div class="lane video-lane" id="laneVideo"></div>
+                <div class="lane voice-lane" id="laneVoice"></div>
+                <div id="laneAudio"></div>
+              </div>
+              <div class="playhead" id="playhead"></div>
+            </div>
+          </div>
+          <div class="timeline-actions">
+            <button id="btnAddTrack" class="ghost">+ Piste audio</button>
+            <button id="btnAddImage" class="ghost">+ Image / vidéo</button>
+            <span class="muted" id="clipsCount"></span>
+          </div>
+        </div>
+
+        <div class="card transcript-card" data-panel="transcript">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🗣️ Transcription</span></div>
+            <div class="card-tools">
+              <span class="muted" id="transcriptInfo"></span>
+              <button class="ghost" data-collapse title="Replier">▾</button>
+            </div>
+          </div>
+          <div class="transcript" id="transcript">
+            <div class="empty">Pas encore de transcription — clique sur <b>🗣️ Transcrire</b>.</div>
+          </div>
+        </div>
+      </section>
+
+      <div class="splitter" data-split="1" title="Glisser pour redimensionner"></div>
+
+      <aside class="col-right col" data-col="right">
+        <div class="card side-card" data-panel="side">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🧰 Outils & illustrations</span></div>
+            <div class="card-tools"><button class="ghost" data-collapse title="Replier">▾</button></div>
+          </div>
+          <div id="sidePanel"></div>
+        </div>
+      </aside>
+    </main>
+
+    <div class="modal-backdrop" id="modal" hidden>
+      <div class="modal" id="modalBox"></div>
+    </div>
+    <div class="toasts" id="toasts"></div>
+    <input type="file" id="fileInput" hidden multiple />
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
