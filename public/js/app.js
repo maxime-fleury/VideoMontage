@@ -1,4 +1,4 @@
-import { S, on, emit, setProject, duration, clips, allAudioClips } from "./state.js";
+import { S, on, emit, setProject, adoptProject, duration, clips, allAudioClips } from "./state.js";
 import { $, el, api, toast, watchJob, busy, clearBusy, fmtTime, fmtDuration, clamp, openModal, newId, defaultClipEffect } from "./api.js";
 import { initWaveform, drawWaveform, scrollToPlayhead } from "./waveform.js";
 import { Player, Stage } from "./player.js";
@@ -10,6 +10,11 @@ import { openRecorder, openExport, openSettings, openProjects, openAuto } from "
 import { initLayout } from "./layout.js";
 import { initLibrary, renderLibrary } from "./library.js";
 import { initHistory } from "./history.js";
+import { initPanelsMenu } from "./panelsmenu.js";
+import { initTexts, addTextAtPlayhead } from "./texts.js";
+import { initOverlayEditor } from "./overlays.js";
+import { initAutopilot } from "./autopilot.js";
+import { addAudioTrack, addOverlayClip, addVideoLayer, findOverlayClip, removeOverlayClip } from "./tracks.js";
 
 export const player = new Player();
 let stage = null;
@@ -27,11 +32,16 @@ async function boot() {
   initSubtitles();
   initLibrary();
   initHistory();
+  initPanelsMenu();
+  initTexts();
+  initOverlayEditor();
   stage = new Stage($("#stage"));
   wireButtons();
   wireEvents();
   wireShortcuts();
   await loadSetup();
+  await loadMotions();
+  initAutopilot();
   const list = await api("/api/projects");
   if (list.projects.length) {
     const { project } = await api(`/api/projects/${list.projects[0].id}`);
@@ -50,6 +60,15 @@ async function loadSetup() {
     S.setup = null;
   }
   renderSidePanel();
+}
+
+/** Catalogue des placements et mouvements prédéfinis (mêmes gabarits que le rendu). */
+async function loadMotions() {
+  try {
+    S.motions = await api("/api/motions");
+  } catch {
+    S.motions = null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -84,12 +103,16 @@ function wireButtons() {
     await voiceOp("Réinitialisation", () => api(`/api/projects/${S.project.id}/voice/reset`, { method: "POST" }));
   });
 
-  $("#btnAddTrack").addEventListener("click", async () => {
-    const track = { id: `trk_${Math.random().toString(36).slice(2, 9)}`, name: `Piste ${(S.project.audioTracks?.length || 0) + 1}`, kind: "music", muted: false, clips: [] };
-    S.project.audioTracks.push(track);
-    emit("persist");
-    emit("render");
-    toast(`Piste « ${track.name} » ajoutée — importe un son avec 📁 Importer`, "ok");
+  $("#btnAddTrack").addEventListener("click", () => addAudioTrack($("#addTrackKind")?.value || "music"));
+  $("#btnAddVideoTrack").addEventListener("click", () => addVideoLayer());
+  $("#btnAddText").addEventListener("click", () => addTextAtPlayhead());
+  // Amène le panneau « Montage automatique » sous les yeux (le lancement s'y trouve).
+  $("#btnAutoFull").addEventListener("click", () => emit("auto-open"));
+  $("#btnStageOverlays").addEventListener("click", () => {
+    S.showOverlays = !S.showOverlays;
+    $("#btnStageOverlays").classList.toggle("active", S.showOverlays);
+    stage.showIncrustations = S.showOverlays;
+    stage.update(S.playhead);
   });
   $("#btnAddImage").addEventListener("click", () => pickFiles("media"));
 }
@@ -129,7 +152,7 @@ async function uploadAs(file, role) {
   try {
     const data = await uploadFile(file, role);
     node.remove();
-    S.project = data.project;
+    adoptProject(data.project);
     emit("project-external", data.project);
     toast(role === "voice" ? "Piste voix importée ✓" : "Fichier importé ✓", "ok");
     return data;
@@ -216,7 +239,7 @@ async function voiceOp(label, fn) {
   try {
     const data = await fn();
     if (data.project) {
-      S.project = data.project;
+      adoptProject(data.project);
       emit("project-external", data.project);
     }
     for (const warning of data.warnings || []) toast(warning, "error", 8000);
@@ -293,16 +316,27 @@ function bladeAtPlayhead() {
 }
 
 /** Dépôt de médias: fichiers glissés sur la scène ou la timeline. */
-async function handleDrop({ files, time, target, trackId }) {
+async function handleDrop({ files, time, target, trackId, layerId }) {
   for (const file of files) {
     const kind = file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : "audio";
     if (kind === "audio" && target === "voice") {
       await uploadAs(file, "voice");
       continue;
     }
-    const data = await uploadAs(file, target === "video" && kind !== "audio" ? "clip" : "music");
+    const wantsOverlay = target === "overlay" && kind !== "audio";
+    const data = await uploadAs(file, target === "video" && kind !== "audio" ? "clip" : wantsOverlay ? "clip" : "music");
     if (!data?.source) continue;
     const source = data.source;
+    if (wantsOverlay) {
+      const layer = (S.project.overlayLayers || []).find((l) => l.id === layerId) || (S.project.overlayLayers || [])[0];
+      if (!layer) {
+        toast("Ajoute d'abord une piste vidéo (＋ Piste vidéo)", "error");
+        continue;
+      }
+      const clip = addOverlayClip(layer.id, source, time);
+      if (clip) emit("selection-clip", { id: clip.id, kind: "overlay", ids: [clip.id] });
+      continue;
+    }
     if (kind === "audio") {
       let track = S.project.audioTracks.find((t) => t.id === trackId);
       if (!track) track = S.project.audioTracks[0];
@@ -514,7 +548,7 @@ function renderToolOptions() {
               return;
             }
             const { project } = await api(`/api/projects/${S.project.id}`);
-            S.project = project;
+            adoptProject(project);
             emit("project-external", project);
             toast(`Transcription terminée : ${state.result?.segments} phrases ✓`, "ok");
           });
@@ -697,6 +731,14 @@ function wireShortcuts() {
       case "Backspace":
         emit("delete-selected");
         break;
+      case "v":
+      case "V":
+        addVideoLayer();
+        break;
+      case "x":
+      case "X":
+        addTextAtPlayhead();
+        break;
     }
   });
 }
@@ -706,6 +748,9 @@ on("delete-selected", () => {
   if (!ids.length) return;
   S.project.videoTrack = S.project.videoTrack.filter((c) => !ids.includes(c.id));
   for (const track of S.project.audioTracks) track.clips = track.clips.filter((c) => !ids.includes(c.id));
+  for (const layer of S.project.overlayLayers || []) layer.clips = layer.clips.filter((c) => !ids.includes(c.id));
+  S.project.texts = (S.project.texts || []).filter((t) => !ids.includes(t.id));
+  if (S.selectedTextId && ids.includes(S.selectedTextId)) S.selectedTextId = null;
   S.selectedClipId = null;
   S.selectedClipIds = [];
   emit("persist");

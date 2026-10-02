@@ -1,5 +1,5 @@
-import { S, emit, duration, clips } from "./state.js";
-import { $, el, api, toast, openModal, clamp, fmtDuration, fmtTime, watchJob } from "./api.js";
+import { S, emit, duration, clips, adoptProject } from "./state.js";
+import { $, el, api, toast, openModal, clamp, fmtDuration, fmtTime, watchJob, cancelJobButton } from "./api.js";
 
 // ---------------------------------------------------------------------------
 // Enregistrement micro
@@ -109,7 +109,7 @@ export async function openRecorder() {
       const data = await api(`/api/projects/${S.project.id}/upload`, { method: "POST", form });
       status2.remove();
       toast(role === "voice" ? "Piste voix mise à jour ✓" : "Piste ajoutée ✓", "ok");
-      S.project = data.project;
+      adoptProject(data.project);
       emit("project-external", data.project);
       close();
     } catch (e) {
@@ -185,7 +185,7 @@ export function openExport() {
         method: "POST",
         body: { subtitles: { ...(S.project.subtitles || {}), enabled: burnSubtitles.checked } },
       });
-      S.project = project;
+      adoptProject(project);
       emit("subtitles-loaded");
       emit("project-external", project);
       toast(burnSubtitles.checked ? "Sous-titres incrustés au rendu" : "Sous-titres désactivés", "ok", 3500);
@@ -264,7 +264,7 @@ export function openExport() {
       progress,
       status,
       resultBox,
-      el("div", { class: "footer" }, [el("button", { text: "Fermer", onclick: () => closeModal() }), btn]),
+      el("div", { class: "footer" }, [el("button", { text: "Fermer", onclick: () => closeModal() }), cancelJobButton("⏹ Annuler le rendu"), btn]),
     ])
   );
 }
@@ -340,7 +340,7 @@ export function openSettings() {
 
   async function saveOutput(patch) {
     const { project } = await api(`/api/projects/${S.project.id}/update`, { method: "POST", body: { output: patch } });
-    S.project = project;
+    adoptProject(project);
     emit("project-external", project);
   }
 
@@ -376,7 +376,7 @@ export async function openProjects() {
             text: p.id === S.project?.id ? "ouvert" : "Ouvrir",
             onclick: async () => {
               const { project } = await api(`/api/projects/${p.id}`);
-              S.project = project;
+              adoptProject(project);
               emit("project-external", project);
               closeModal();
               toast(`Projet « ${project.name} » ouvert`, "ok");
@@ -410,7 +410,7 @@ export async function openProjects() {
   createForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const { project } = await api("/api/projects", { method: "POST", body: { name: nameInput.value.trim() || "Nouveau montage" } });
-    S.project = project;
+    adoptProject(project);
     emit("project-external", project);
     closeModal();
   });
@@ -427,7 +427,7 @@ export async function openProjects() {
       const res = await fetch("/api/projects/import", { method: "POST", body: form });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
-      S.project = data.project;
+      adoptProject(data.project);
       emit("project-external", data.project);
       note.remove();
       toast(`Projet restauré : ${data.project.name}`, "ok", 6000);
@@ -573,7 +573,7 @@ export function openAuto() {
         status.textContent = state.message;
         toast(state.message, "ok");
         if (state.result?.project) {
-          S.project = state.result.project;
+          adoptProject(state.result.project);
           emit("project-external", state.result.project);
         }
         closeModal();
@@ -604,7 +604,7 @@ export function openAuto() {
       el("div", { class: "prop-row" }, [el("span", { text: "Remplacer le montage actuel" }), replace]),
       progress,
       status,
-      el("div", { class: "footer" }, [el("button", { text: "Annuler", onclick: () => closeModal() }), btn]),
+      el("div", { class: "footer" }, [el("button", { text: "Fermer", onclick: () => closeModal() }), cancelJobButton("⏹ Annuler la génération"), btn]),
     ])
   );
 }

@@ -1,4 +1,4 @@
-import { S, emit, on, duration, clips, sourceById, allAudioClips } from "./state.js";
+import { S, emit, on, duration, clips, sourceById, allAudioClips, adoptProject } from "./state.js";
 import { $, el, api, toast, clamp, fmtTime, fmtDuration, watchJob } from "./api.js";
 import { openImageEditor, openIllustrationPicker } from "./illustrations.js";
 
@@ -77,7 +77,7 @@ async function addResult(result) {
     } else {
       toast(`« ${S.search.query} » ajouté à ${fmtTime(start)}`, "ok");
     }
-    S.project = project;
+    adoptProject(project);
     emit("project-external", project);
   } catch (e) {
     toast(`Ajout impossible : ${e.message}`, "error");
@@ -535,7 +535,7 @@ function renderVoiceInfo() {
       method: "POST",
       body: { enabled: norm.checked },
     });
-    S.project = project;
+    adoptProject(project);
     emit("project-external", project);
   });
   box.append(el("div", { class: "prop-row", style: { marginTop: "6px" } }, [el("span", { text: "Normaliser la voix (EBU R128)" }), norm]));

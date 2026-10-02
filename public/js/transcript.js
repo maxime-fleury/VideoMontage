@@ -1,4 +1,4 @@
-import { S, emit, on, clips } from "./state.js";
+import { S, emit, on, clips, adoptProject } from "./state.js";
 import { $, el, api, toast, openModal, fmtTime, clamp } from "./api.js";
 import { openIllustrationPicker } from "./illustrations.js";
 
@@ -26,7 +26,7 @@ function openWordEditor(word, segment) {
 
   const refresh = async () => {
     const { project } = await api(`/api/projects/${S.project.id}`);
-    S.project = project;
+    adoptProject(project);
     emit("project-external", project);
   };
 
@@ -36,7 +36,7 @@ function openWordEditor(word, segment) {
         method: "POST",
         body: { action: "update-word", segmentId: segment.id, index: segment.words.indexOf(word), text: input.value },
       });
-      S.project = project;
+      adoptProject(project);
       emit("project-external", project);
       toast("Mot corrigé ✓", "ok");
       close?.();
@@ -86,7 +86,7 @@ function openWordEditor(word, segment) {
               method: "POST",
               body: { action: "delete-word", segmentId: segment.id, index: segment.words.indexOf(word) },
             });
-            S.project = project;
+            adoptProject(project);
             emit("project-external", project);
             toast("Mot supprimé", "ok");
             close?.();
@@ -104,7 +104,7 @@ function openWordEditor(word, segment) {
               method: "POST",
               body: { action: "delete-segment", segmentId: segment.id },
             });
-            S.project = project;
+            adoptProject(project);
             emit("project-external", project);
             toast("Phrase supprimée de la transcription", "ok");
             close?.();

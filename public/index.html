@@ -25,13 +25,17 @@
         <span class="spinner"></span>
         <span id="jobText" class="muted"></span>
         <div class="progress" style="width: 90px; margin: 0"><div id="jobBar"></div></div>
+        <button id="jobCancel" class="ghost icon" hidden title="Interrompre la tâche en cours">✕</button>
       </div>
       <div class="topbar-actions">
         <button id="btnUndo" class="ghost icon" title="Annuler (Ctrl+Z)" disabled>↶</button>
         <button id="btnRedo" class="ghost icon" title="Rétablir (Ctrl+Shift+Z)" disabled>↷</button>
         <button id="btnRecord" title="Enregistrer au micro">🎙️ Enregistrer</button>
         <button id="btnImport" title="Importer un fichier (audio, vidéo, image)">📁 Importer</button>
-        <button id="btnLayoutReset" class="ghost icon" title="Réorganiser les panneaux par défaut">🧩</button>
+        <div class="menu-wrap">
+          <button id="btnPanels" class="ghost" title="Afficher / masquer les panneaux et gérer les pistes">🧩 Panneaux</button>
+          <div class="dropdown" id="panelsMenu" hidden></div>
+        </div>
         <button id="btnSettings" class="ghost icon" title="Réglages Whisper / RNNoise / polices">⚙️</button>
         <button id="btnExport" class="primary" title="Rendu final MP4">🎬 Exporter</button>
       </div>
@@ -39,10 +43,13 @@
 
     <main class="layout">
       <section class="col-left col" data-col="left">
-        <div class="card preview-card" data-panel="preview">
+        <div class="card preview-card" data-panel="preview" data-panel-name="🎬 Aperçu">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🎬 Aperçu</span></div>
-            <div class="card-tools"><button class="ghost" data-collapse title="Replier">▾</button></div>
+            <div class="card-tools">
+              <button class="ghost" id="btnStageOverlays" title="Afficher les incrustations et les textes dans l'aperçu">👁 Incrustations</button>
+              <button class="ghost" data-collapse title="Replier">▾</button>
+            </div>
           </div>
           <div class="stage" id="stage">
             <div class="stage-empty" id="stageEmpty">
@@ -62,7 +69,7 @@
           </div>
         </div>
 
-        <div class="card voice-card" data-panel="voice">
+        <div class="card voice-card" data-panel="voice" data-panel-name="🎙️ Piste voix">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🎙️ Piste voix</span><span class="levels" id="levels"></span></div>
             <div class="card-tools"><button class="ghost" data-collapse title="Replier">▾</button></div>
@@ -74,6 +81,7 @@
             <button id="btnTranscribe" title="Timecoder avec Whisper (T)">🗣️ Transcrire</button>
             <button id="btnSubtitles" title="Sous-titres : police, couleurs, animations">💬 Sous-titres</button>
             <button id="btnAuto" title="Montage automatique depuis les mots-clés">🪄 Montage auto</button>
+            <button id="btnAutoFull" title="Montage complet : silences → transcription → illustrations → sous-titres → export">🤖 Montage complet</button>
             <button id="btnReset" class="ghost" title="Annuler tous les traitements">↺ Réinitialiser</button>
           </div>
           <div class="tool-options hidden" id="toolOptions"></div>
@@ -85,10 +93,8 @@
         </div>
       </section>
 
-      <div class="splitter" data-split="0" title="Glisser pour redimensionner"></div>
-
       <section class="col-center col" data-col="center">
-        <div class="card timeline-card" data-panel="timeline">
+        <div class="card timeline-card" data-panel="timeline" data-panel-name="🖼️ Timeline du montage">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🖼️ Timeline du montage</span></div>
             <div class="card-tools">
@@ -98,29 +104,33 @@
           </div>
           <div class="timeline-scroll" id="timelineScroll">
             <div class="timeline" id="timeline">
-              <div class="labels">
-                <div class="label-row ruler-label">Temps</div>
-                <div class="label-row">Vidéo</div>
-                <div class="label-row">Voix</div>
-                <div id="trackLabels"></div>
-              </div>
+              <div class="labels" id="labels"></div>
               <div class="lanes" id="lanes">
                 <div class="lane ruler" id="ruler"></div>
                 <div class="lane video-lane" id="laneVideo"></div>
+                <div id="laneOverlays"></div>
                 <div class="lane voice-lane" id="laneVoice"></div>
                 <div id="laneAudio"></div>
+                <div id="laneTexts"></div>
               </div>
               <div class="playhead" id="playhead"></div>
             </div>
           </div>
           <div class="timeline-actions">
-            <button id="btnAddTrack" class="ghost">+ Piste audio</button>
+            <button id="btnAddVideoTrack" class="ghost" title="Ajouter une piste vidéo (superpositions)">+ Piste vidéo</button>
+            <button id="btnAddTrack" class="ghost" title="Ajouter une piste audio">+ Piste audio</button>
+            <select id="addTrackKind" class="ghost" title="Type de piste audio">
+              <option value="music">🎵 Musique</option>
+              <option value="sfx">💥 Bruitage</option>
+              <option value="other">🔊 Ambiance</option>
+            </select>
+            <button id="btnAddText" class="ghost" title="Ajouter un texte libre (X)">+ Texte</button>
             <button id="btnAddImage" class="ghost">+ Image / vidéo</button>
             <span class="muted" id="clipsCount"></span>
           </div>
         </div>
 
-        <div class="card transcript-card" data-panel="transcript">
+        <div class="card transcript-card" data-panel="transcript" data-panel-name="🗣️ Transcription">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🗣️ Transcription</span></div>
             <div class="card-tools">
@@ -134,10 +144,19 @@
         </div>
       </section>
 
-      <div class="splitter" data-split="1" title="Glisser pour redimensionner"></div>
-
       <aside class="col-right col" data-col="right">
-        <div class="card library-card" data-panel="library">
+        <div class="card autopilot-card" data-panel="auto" data-panel-name="🤖 Montage automatique">
+          <div class="card-title">
+            <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🤖 Montage automatique</span></div>
+            <div class="card-tools">
+              <span class="muted" id="autoInfo"></span>
+              <button class="ghost" data-collapse title="Replier">▾</button>
+            </div>
+          </div>
+          <div id="autoPanel"></div>
+        </div>
+
+        <div class="card library-card" data-panel="library" data-panel-name="🗂️ Médiathèque">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🗂️ Médiathèque</span></div>
             <div class="card-tools">
@@ -147,7 +166,7 @@
           </div>
           <div id="library"></div>
         </div>
-        <div class="card side-card" data-panel="side">
+        <div class="card side-card" data-panel="side" data-panel-name="🧰 Outils & illustrations">
           <div class="card-title">
             <div class="title-left"><span class="drag-handle" title="Glisser pour déplacer ce panneau">⠿</span><span>🧰 Outils & illustrations</span></div>
             <div class="card-tools"><button class="ghost" data-collapse title="Replier">▾</button></div>

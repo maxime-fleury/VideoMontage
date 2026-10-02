@@ -1,4 +1,4 @@
-import { S, on, emit } from "./state.js";
+import { S, on, emit, adoptProject } from "./state.js";
 import { $, api, toast } from "./api.js";
 
 const LIMIT = 40;
@@ -19,6 +19,8 @@ function snapshot(project) {
     name: project.name,
     videoTrack: clone(project.videoTrack) || [],
     audioTracks: clone(project.audioTracks) || [],
+    overlayLayers: clone(project.overlayLayers) || [],
+    texts: clone(project.texts) || [],
     subtitles: clone(project.subtitles),
     transcript: clone(project.transcript) ?? null,
     output: clone(project.output),
@@ -67,8 +69,8 @@ async function apply(target, label) {
   applying = true;
   try {
     const { project } = await api(`/api/projects/${S.project.id}/update`, { method: "POST", body });
-    S.project = project;
-    emit("project-external", project);
+    adoptProject(project);
+    emit("project-external", S.project);
     emit("render");
     if (label) toast(label, "info", 2000);
   } catch (e) {

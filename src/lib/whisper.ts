@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { MODELS_DIR, WHISPER_DIR, buildDir, ensureDir, formatBytes, run, runSync } from "./util";
 import type { Project, Transcript, TranscriptSegment, Word } from "./store";
@@ -230,6 +231,15 @@ function tokensToWords(tokens: RawToken[]): Word[] {
   return words;
 }
 
+/** Threads à donner à whisper.cpp : tous les cœurs sauf un. */
+function whisperThreads() {
+  try {
+    return Math.max(2, os.cpus().length - 1);
+  } catch {
+    return 0;
+  }
+}
+
 /** Transcrit la piste voix compilée (wav 16k mono). */
 export async function transcribe(
   project: Project,
@@ -258,6 +268,16 @@ export async function transcribe(
   }
   args.push("-of", outPrefix);
   if (help.includes("--print-progress") || help.includes("-pp")) args.push("-pp");
+  // Accélérations : threads explicites (whisper.cpp en utilise 4 par défaut) et
+  // flash attention quand le binaire la supporte.
+  if (/--threads|\s-t\s/.test(help)) {
+    const threads = whisperThreads();
+    if (threads > 0) args.push("-t", String(threads));
+  }
+  // flash attention : accélère nettement quand le binaire la supporte
+  if (help.includes("--flash-attn")) args.push("-fa");
+  // (pas de VAD intégré : la détection des silences de l'app fait déjà ce filtrage)
+  onProgress(0.02, "Configuration de la transcription…");
   onProgress(0.03, "Chargement du modèle…");
 
   const res = await run([binary, ...args], {

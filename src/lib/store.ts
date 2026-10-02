@@ -165,6 +165,131 @@ export type AudioTrack = {
   clips: AudioClip[];
 };
 
+// ---------------------------------------------------------------------------
+// Superpositions : calques vidéo/image au-dessus de la piste principale
+// ---------------------------------------------------------------------------
+
+/** Mouvements prédéfinis applicables à une incrustation (voir lib/motions.ts). */
+export type MotionPresetId =
+  | "none"
+  | "pip-static"
+  | "pip-corner"
+  | "drift-left"
+  | "drift-right"
+  | "drift-up"
+  | "drift-down"
+  | "zoom-in"
+  | "zoom-out"
+  | "pop"
+  | "slide-in-left"
+  | "slide-in-right"
+  | "slide-in-top"
+  | "slide-in-bottom";
+
+/**
+ * Cadre d'une incrustation, exprimé en fractions 0..1 du cadre de sortie.
+ * Le même modèle sert à l'aperçu (pourcentages CSS) et au rendu (ffmpeg), ce qui
+ * garantit que ce que tu déplaces à la souris est ce qui est exporté.
+ */
+export type Box = { x: number; y: number; w: number; h: number };
+
+export type Motion = {
+  preset: MotionPresetId;
+  /** intensité 0..1 (dérive, zoom) */
+  amount: number;
+};
+
+export type OverlayClip = {
+  id: string;
+  sourceId: string;
+  start: number; // timeline
+  duration: number;
+  offset: number; // dans la source (vidéo)
+  box: Box;
+  /** contain = entier visible (logos), cover = remplit le cadre (recadre) */
+  fit: "cover" | "contain";
+  opacity: number;
+  rotation: number;
+  motion: Motion;
+  fadeIn: number;
+  fadeOut: number;
+  /** bande son de la vidéo incrustée (coupée par défaut) */
+  audio: { mute: boolean; gain: number };
+  createdAt: number;
+};
+
+export type OverlayLayer = {
+  id: string;
+  name: string;
+  hidden: boolean;
+  clips: OverlayClip[];
+};
+
+// ---------------------------------------------------------------------------
+// Textes libres (indépendants de la voix)
+// ---------------------------------------------------------------------------
+
+export type TextStyle = {
+  font: string;
+  /** taille en fraction de la hauteur (0.06 ≈ 65 px en 1080p) */
+  size: number;
+  bold: boolean;
+  italic: boolean;
+  color: string;
+  /** couleur de surlignage (animation « mot par mot ») */
+  highlightColor: string;
+  outlineColor: string;
+  /** épaisseur du contour en px à 1080p */
+  outlineWidth: number;
+  /** ombre portée en px à 1080p (0 = aucune) */
+  shadow: number;
+  /** pastille de fond ("" = aucune) */
+  background: string;
+  padding: number;
+  uppercase: boolean;
+  letterSpacing: number;
+  lineHeight: number;
+  align: "left" | "center" | "right";
+};
+
+export type TextAnimationIn =
+  | "none"
+  | "fade"
+  | "pop"
+  | "slide-up"
+  | "slide-down"
+  | "slide-left"
+  | "slide-right"
+  | "typewriter"
+  | "word-highlight";
+export type TextAnimationOut = "none" | "fade" | "pop" | "slide";
+
+export type TextOverlay = {
+  id: string;
+  text: string;
+  start: number;
+  duration: number;
+  /** centre du bloc en fractions 0..1 du cadre (w/h = taille de référence du bloc) */
+  box: Box;
+  rotation: number;
+  z: number;
+  style: TextStyle;
+  animation: { in: TextAnimationIn; out: TextAnimationOut; duration: number };
+  createdAt: number;
+};
+
+/** Progression du pilote « montage auto complet » (points de contrôle). */
+export type AutoStepId = "silences" | "transcription" | "keywords" | "illustrations" | "subtitles" | "export";
+
+export type AutoState = {
+  jobId?: string;
+  stage?: AutoStepId;
+  completed: AutoStepId[];
+  options?: Record<string, unknown>;
+  report?: string[];
+  updatedAt: number;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -179,6 +304,11 @@ export type Project = {
   transcript?: Transcript;
   videoTrack: VideoClip[];
   audioTracks: AudioTrack[];
+  /** calques d'incrustation au-dessus de la piste principale (Vidéo 2, 3…) */
+  overlayLayers: OverlayLayer[];
+  /** textes libres, indépendants de la voix */
+  texts: TextOverlay[];
+  auto?: AutoState;
   subtitles?: Subtitles;
   output: {
     width: number;
@@ -198,6 +328,44 @@ export function defaultEffect(): ClipEffect {
     zoomTo: 1.12,
     transition: { type: "fade-black", duration: 0.5 },
   };
+}
+
+export function defaultBox(): Box {
+  // PiP au coin inférieur droit, avec une petite marge.
+  return { x: 0.6, y: 0.6, w: 0.34, h: 0.34 };
+}
+
+export function defaultMotion(): Motion {
+  return { preset: "pip-corner", amount: 0.5 };
+}
+
+export function defaultTextStyle(): TextStyle {
+  return {
+    font: "Outfit",
+    size: 0.07,
+    bold: true,
+    italic: false,
+    color: "#ffffff",
+    highlightColor: "#ffd166",
+    outlineColor: "#1a1030",
+    outlineWidth: 4,
+    shadow: 8,
+    background: "",
+    padding: 14,
+    uppercase: false,
+    letterSpacing: 0,
+    lineHeight: 1.15,
+    align: "center",
+  };
+}
+
+export function defaultTextAnimation(): TextOverlay["animation"] {
+  return { in: "pop", out: "fade", duration: 0.35 };
+}
+
+export function defaultTextBox(): Box {
+  // Bandeau centré horizontalement (coin haut-gauche + taille, comme les incrustations).
+  return { x: 0.15, y: 0.22, w: 0.7, h: 0.12 };
 }
 
 export function defaultEdits(): VoiceEdits {
@@ -248,6 +416,8 @@ export async function createProject(name: string): Promise<Project> {
       { id: newId("trk"), name: "Musique", kind: "music", muted: false, clips: [] },
       { id: newId("trk"), name: "Bruitages", kind: "sfx", muted: false, clips: [] },
     ],
+    overlayLayers: [],
+    texts: [],
     output: { width: 1920, height: 1080, fps: 30, normalize: true, crf: 20 },
   };
   await ensureProjectDirs(id);
@@ -290,6 +460,38 @@ export async function getProject(pid: string): Promise<Project | null> {
     effect: { ...defaultEffect(), ...(clip.effect || {}), transition: { ...defaultEffect().transition, ...(clip.effect?.transition || {}) } },
   }));
   p.audioTracks = p.audioTracks || [];
+  // Calques d'incrustation : défauts sur chaque champ (projets d'avant cette version).
+  p.overlayLayers = (p.overlayLayers || []).map((layer, index) => ({
+    id: layer.id || newId("lyr"),
+    name: layer.name || `Vidéo ${index + 2}`,
+    hidden: !!layer.hidden,
+    clips: (layer.clips || []).map((clip) => ({
+      ...clip,
+      start: Math.max(0, Number(clip.start) || 0),
+      duration: Math.max(0.05, Number(clip.duration) || 1),
+      offset: Math.max(0, Number(clip.offset) || 0),
+      box: { ...defaultBox(), ...(clip.box || {}) },
+      fit: clip.fit === "contain" ? "contain" : "cover",
+      opacity: typeof clip.opacity === "number" ? clip.opacity : 1,
+      rotation: Number(clip.rotation) || 0,
+      motion: { ...defaultMotion(), ...(clip.motion || {}) },
+      fadeIn: Number(clip.fadeIn) || 0,
+      fadeOut: Number(clip.fadeOut) || 0,
+      audio: { mute: clip.audio?.mute !== false, gain: Number(clip.audio?.gain) || 1 },
+      createdAt: clip.createdAt || Date.now(),
+    })),
+  }));
+  p.texts = (p.texts || []).map((text) => ({
+    ...text,
+    start: Math.max(0, Number(text.start) || 0),
+    duration: Math.max(0.05, Number(text.duration) || 2),
+    box: { ...defaultTextBox(), ...(text.box || {}) },
+    rotation: Number(text.rotation) || 0,
+    z: Number(text.z) || 0,
+    style: { ...defaultTextStyle(), ...(text.style || {}) },
+    animation: { ...defaultTextAnimation(), ...(text.animation || {}) },
+    createdAt: text.createdAt || Date.now(),
+  }));
   p.subtitles = { ...defaultSubtitles(), ...(p.subtitles || {}) };
   p.output = { width: 1920, height: 1080, fps: 30, normalize: true, crf: 20, ...(p.output || {}) };
   return p;

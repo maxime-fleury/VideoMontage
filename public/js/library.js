@@ -1,5 +1,6 @@
-import { S, on, emit, duration } from "./state.js";
+import { S, on, emit, duration, adoptProject } from "./state.js";
 import { $, el, api, toast, openModal, fmtTime, clamp, newId, defaultClipEffect } from "./api.js";
+import { addOverlayClip } from "./tracks.js";
 
 const MIME_DRAG = "application/x-montage-source";
 let host = null;
@@ -13,7 +14,11 @@ function usageCount(sourceId) {
     (n, track) => n + track.clips.filter((c) => c.sourceId === sourceId).length,
     0
   );
-  return video + audio;
+  const overlays = (S.project?.overlayLayers || []).reduce(
+    (n, layer) => n + layer.clips.filter((c) => c.sourceId === sourceId).length,
+    0
+  );
+  return video + audio + overlays;
 }
 
 function kindLabel(source) {
@@ -47,9 +52,19 @@ function thumb(source) {
   return box;
 }
 
-function addSourceToTimeline(source, time, target = "video", trackId = null) {
+function addSourceToTimeline(source, time, target = "video", trackId = null, layerId = null) {
   if (!source) return null;
   const at = Math.max(0, Number(time) || 0);
+  if (target === "overlay") {
+    const layer = (S.project?.overlayLayers || []).find((l) => l.id === layerId) || (S.project?.overlayLayers || [])[0];
+    if (!layer) {
+      toast("Ajoute d'abord une piste vidéo (＋ Piste vidéo)", "error");
+      return null;
+    }
+    const clip = addOverlayClip(layer.id, source, at);
+    if (clip) emit("selection-clip", { id: clip.id, kind: "overlay", ids: [clip.id] });
+    return clip;
+  }
   if (source.kind === "audio") {
     let track = S.project.audioTracks.find((t) => t.id === trackId) || S.project.audioTracks[0];
     if (!track) {
@@ -127,7 +142,7 @@ async function removeSource(source) {
   if (!confirm(`Supprimer « ${source.name} » du projet ?`)) return;
   try {
     const { project } = await api(`/api/projects/${S.project.id}/sources/${source.id}`, { method: "DELETE" });
-    S.project = project;
+    adoptProject(project);
     emit("project-external", project);
     toast("Média supprimé", "ok");
   } catch (e) {
@@ -240,9 +255,9 @@ export function initLibrary() {
     });
   }
   // dépôt depuis la médiathèque vers la timeline (ou tout autre émetteur)
-  on("library-add", ({ sourceId, time, target, trackId }) => {
+  on("library-add", ({ sourceId, time, target, trackId, layerId }) => {
     const source = S.project?.sources?.find((s) => s.id === sourceId);
-    if (source) addSourceToTimeline(source, time, target, trackId);
+    if (source) addSourceToTimeline(source, time, target, trackId, layerId);
   });
   on("project", () => {
     signature = "";

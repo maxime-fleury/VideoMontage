@@ -1,4 +1,4 @@
-import { S, emit, clips, sourceById } from "./state.js";
+import { S, emit, clips, sourceById, adoptProject } from "./state.js";
 import { $, el, api, toast, openModal, clamp, fmtTime, newId } from "./api.js";
 
 const PROVIDERS = [
@@ -54,7 +54,7 @@ export async function placeImage(result, { keyword, start, duration, replaceClip
       project = res.project;
     }
   }
-  S.project = project;
+  adoptProject(project);
   emit("project-external", project);
   return data.clip;
 }
@@ -316,7 +316,7 @@ export function openImageEditor(source, { onDone, keyword } = {}) {
         method: "POST",
         body: { sourceId: source.id, ops, keyword: keyword || source.meta?.keyword || "" },
       });
-      S.project = data.project;
+      adoptProject(data.project);
       emit("project-external", data.project);
       toast("Image retouchée ✓", "ok");
       onDone?.(data.source);

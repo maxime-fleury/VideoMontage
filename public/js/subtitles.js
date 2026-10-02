@@ -1,4 +1,4 @@
-import { S, emit, on } from "./state.js";
+import { S, emit, on, adoptProject } from "./state.js";
 import { $, api, el, clamp, openModal, toast, watchJob } from "./api.js";
 
 export let PRESETS = {};
@@ -55,6 +55,8 @@ export async function loadFonts() {
   style.textContent = rules.join("\n");
   FONTS = [...SYSTEM_FONTS, ...installed.map((f) => f.label)];
   FONT_NOTES = Object.fromEntries(installed.filter((f) => f.note).map((f) => [f.label, f.note]));
+  // Les éditeurs (textes libres) proposent le même catalogue de polices locales.
+  S.fonts = FONTS;
   emit("fonts");
 }
 
@@ -92,7 +94,7 @@ function persistSubtitles(immediate = false) {
         method: "POST",
         body: { subtitles: S.subtitleStyle },
       });
-      S.project = { ...S.project, subtitles: project.subtitles };
+      adoptProject({ ...S.project, subtitles: project.subtitles });
       emit("project-external", S.project);
     } catch (e) {
       toast(`Sous-titres : ${e.message}`, "error");

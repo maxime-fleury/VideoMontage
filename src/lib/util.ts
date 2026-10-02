@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 
-export const DATA_DIR = "data";
+// surchargeables pour les tests (dossier de données isolé) : voir tests/api.test.ts
+export const DATA_DIR = process.env.MONTAGE_DATA_DIR || "data";
 export const PROJECTS_DIR = `${DATA_DIR}/projects`;
 export const MODELS_DIR = `${DATA_DIR}/models`;
 export const TOOLS_DIR = `${DATA_DIR}/tools`;
@@ -67,12 +68,35 @@ export type RunOptions = {
   onStderr?: (chunk: string) => void;
   timeoutMs?: number;
   env?: Record<string, string>;
+  /** Annulation fine ; par défaut le signal du travail lourd en cours (voir setActiveSignal). */
+  signal?: AbortSignal;
 };
 
-export type RunResult = { code: number; stdout: string; stderr: string; killed: boolean };
+export type RunResult = { code: number; stdout: string; stderr: string; killed: boolean; aborted: boolean };
 
-/** Lance une commande, stream stdout/stderr, gère le timeout. */
+/** Erreur levée quand l'utilisateur annule une tâche en cours. */
+export class RunCancelled extends Error {
+  constructor(message = "Opération annulée") {
+    super(message);
+    this.name = "RunCancelled";
+  }
+}
+
+/**
+ * Signal du travail lourd en cours (rendu, transcription, montage auto). Tant
+ * qu'il est armé, chaque commande lancée est tuée à l'annulation — sans avoir à
+ * faire descendre le signal dans toutes les signatures.
+ */
+let activeSignal: AbortSignal | null = null;
+
+export function setActiveSignal(signal: AbortSignal | null) {
+  activeSignal = signal;
+}
+
+/** Lance une commande, stream stdout/stderr, gère le timeout et l'annulation. */
 export async function run(cmd: string[], opts: RunOptions = {}): Promise<RunResult> {
+  const signal = opts.signal ?? activeSignal ?? undefined;
+  if (signal?.aborted) throw new RunCancelled();
   const proc = Bun.spawn(cmd, {
     cwd: opts.cwd,
     stdout: "pipe",
@@ -83,6 +107,16 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<RunResu
   let stdout = "";
   let stderr = "";
   let killed = false;
+  let aborted = false;
+
+  const onAbort = () => {
+    aborted = true;
+    killed = true;
+    try {
+      proc.kill("SIGKILL");
+    } catch {}
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
 
   const timer = opts.timeoutMs
     ? setTimeout(() => {
@@ -109,7 +143,9 @@ export async function run(cmd: string[], opts: RunOptions = {}): Promise<RunResu
   await Promise.all([pump(proc.stdout as any, "out"), pump(proc.stderr as any, "err")]);
   const code = await proc.exited;
   if (timer) clearTimeout(timer);
-  return { code, stdout, stderr, killed };
+  signal?.removeEventListener("abort", onAbort);
+  if (aborted || signal?.aborted) throw new RunCancelled();
+  return { code, stdout, stderr, killed, aborted: false };
 }
 
 /** Commande courte, résultat synchrone (usage: probe, vérifications). */
@@ -121,9 +157,10 @@ export function runSync(cmd: string[]): RunResult {
       stdout: proc.stdout?.toString() ?? "",
       stderr: proc.stderr?.toString() ?? "",
       killed: false,
+      aborted: false,
     };
   } catch (e) {
-    return { code: -1, stdout: "", stderr: e instanceof Error ? e.message : String(e), killed: false };
+    return { code: -1, stdout: "", stderr: e instanceof Error ? e.message : String(e), killed: false, aborted: false };
   }
 }
 

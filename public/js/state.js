@@ -9,7 +9,10 @@ export const S = {
   scroll: 0,
   selectedClipId: null,
   selectedClipIds: [], // sélection multiple (Ctrl/Maj + clic)
-  selectedClipKind: null, // video | audio
+  selectedClipKind: null, // video | overlay | text | audio
+  selectedTextId: null, // texte sélectionné sur l'aperçu
+  motions: null, // catalogue des placements/mouvements (GET /api/motions)
+  showOverlays: true, // incrustations et textes visibles dans l'aperçu
   activeWord: null, // { word, start, end, segId }
   search: { query: "", provider: "web", results: [], loading: false, errors: [] },
   transcriptsDirty: false,
@@ -35,12 +38,46 @@ export function emit(event, payload) {
   }
 }
 
+/**
+ * Fusionne un projet reçu du serveur dans le projet courant en conservant
+ * l'identité des objets déjà connus (clips, pistes, calques, textes, styles).
+ *
+ * Sans cela, chaque sauvegarde remplacerait les objets : un éditeur ouvert ou
+ * une poignée de glissement pointerait alors sur une ancienne copie et les
+ * modifications suivantes seraient perdues.
+ */
+export function adoptProject(project) {
+  if (!project) return S.project;
+  S.project = S.project && S.project.id === project.id ? reconcile(S.project, project) : project;
+  return S.project;
+}
+
+export function reconcile(previous, next) {
+  if (Array.isArray(previous) && Array.isArray(next)) {
+    const byId = new Map();
+    for (const item of previous) {
+      if (item && typeof item === "object" && item.id) byId.set(item.id, item);
+    }
+    return next.map((item) => {
+      if (item && typeof item === "object" && item.id && byId.has(item.id)) {
+        return reconcile(byId.get(item.id), item);
+      }
+      return item;
+    });
+  }
+  if (previous && next && typeof previous === "object" && typeof next === "object") {
+    for (const key of Object.keys(next)) previous[key] = reconcile(previous[key], next[key]);
+    return previous;
+  }
+  return next;
+}
+
 export function setProject(project) {
-  S.project = project;
+  adoptProject(project);
   S.build = project?.voice?.build || null;
   if (S.build) S.playhead = Math.min(S.playhead, S.build.duration || 0);
   else S.playhead = 0;
-  emit("project", project);
+  emit("project", S.project);
 }
 
 export function duration() {

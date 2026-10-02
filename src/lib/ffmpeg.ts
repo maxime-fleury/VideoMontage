@@ -2,9 +2,22 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { FFMPEG, FFPROBE, buildDir, clamp, commandExists, ensureDir, run, runSync } from "./util";
-import type { AudioTrack, Denoise, Project, Range, Segment, Source, VideoClip, VoiceBuild, VoiceEdits } from "./store";
+import type {
+  AudioTrack,
+  Denoise,
+  OverlayClip,
+  Project,
+  Range,
+  Segment,
+  Source,
+  VideoClip,
+  VoiceBuild,
+  VoiceEdits,
+} from "./store";
 import { sourceById, sourcePath } from "./store";
 import { writeSubtitles } from "./subtitles";
+import { writeTexts } from "./texts";
+import { motionExprs } from "./motions";
 import { FONTS_DIR } from "./fonts";
 
 export function ffmpegAvailable() {
@@ -660,6 +673,47 @@ async function cleanupClipCache(dir: string) {
   }
 }
 
+/**
+ * Chaîne de filtres d'une incrustation (calque vidéo/image) : cadrage dans le
+ * rectangle voulu, opacité, fondus, rotation puis mouvement prédéfini.
+ * Les positions/taille sont des fractions du cadre de sortie, comme dans l'aperçu.
+ */
+function overlayChain(clip: OverlayClip, duration: number, out: { width: number; height: number }): {
+  chain: string;
+  position: string;
+} {
+  const width = Math.max(2, Math.round((clip.box.w * out.width) / 2) * 2);
+  const height = Math.max(2, Math.round((clip.box.h * out.height) / 2) * 2);
+  const parts: string[] = ["setpts=PTS-STARTPTS"];
+  parts.push(
+    clip.fit === "contain"
+      ? `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0`
+      : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
+  );
+  parts.push("format=rgba");
+  const opacity = Math.max(0, Math.min(1, clip.opacity ?? 1));
+  if (opacity < 0.999) parts.push(`colorchannelmixer=aa=${opacity.toFixed(3)}`);
+  const fadeIn = Math.max(0, Math.min(clip.fadeIn || 0, duration / 2));
+  const fadeOut = Math.max(0, Math.min(clip.fadeOut || 0, duration / 2));
+  if (fadeIn > 0.02) parts.push(`fade=t=in:st=0:d=${fadeIn.toFixed(3)}:alpha=1`);
+  if (fadeOut > 0.02) parts.push(`fade=t=out:st=${(duration - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}:alpha=1`);
+  if (clip.rotation) parts.push(`rotate=${((clip.rotation * Math.PI) / 180).toFixed(6)}:c=none:ow=rotw(iw):oh=roth(ih)`);
+
+  const exprs = motionExprs(clip.motion, clip.box, duration);
+  if (exprs.scale !== "1") {
+    // Échelle animée autour du centre : `t` est le temps local du clip (voir setpts).
+    parts.push(`scale=w='2*ceil(${width}*(${exprs.scale})/2)':h='2*ceil(${height}*(${exprs.scale})/2)':eval=frame`);
+  }
+  // `w`/`h` = taille courante de l'incrustation (après rotation/échelle) → centré.
+  // Les expressions doivent rester entre quotes simples : les gabarits de mouvement
+  // contiennent des virgules (min/max) que ffmpeg prendrait pour des séparateurs.
+  const centerX = (clip.box.x + clip.box.w / 2).toFixed(4);
+  const centerY = (clip.box.y + clip.box.h / 2).toFixed(4);
+  const x = `(${centerX}*W-w/2+(${exprs.dx})*W)`;
+  const y = `(${centerY}*H-h/2+(${exprs.dy})*H)`;
+  return { chain: parts.join(","), position: `x='${x}':y='${y}'` };
+}
+
 /** Expression de position de l'overlay pour les transitions glissées. */
 function overlayPosition(clip: VideoClip) {
   const transition = clip.effect?.transition || { type: "cut", duration: 0 };
@@ -804,6 +858,42 @@ export async function renderMontage(
     }
   }
 
+  // Calques d'incrustation (Vidéo 2, 3…) : vidéo/image par-dessus la piste principale.
+  const layers = (project.overlayLayers || []).filter((layer) => !layer.hidden);
+  const overlayInputs: { index: number; clip: OverlayClip }[] = [];
+  for (const layer of layers) {
+    for (const clip of [...layer.clips].sort((a, b) => a.start - b.start)) {
+      if (!(clip.duration > 0.02)) continue;
+      const source = sourceById(project, clip.sourceId);
+      if (!source) continue;
+      const file = abs(sourcePath(project.id, source));
+      if (source.kind === "video") {
+        argv.push("-ss", Math.max(0, clip.offset).toFixed(3), "-t", clip.duration.toFixed(3), "-i", file);
+      } else {
+        argv.push("-loop", "1", "-framerate", String(fps), "-t", clip.duration.toFixed(3), "-i", file);
+      }
+      overlayInputs.push({ index: inputIndex++, clip });
+      // Bande son de la vidéo incrustée (coupée par défaut).
+      if (source.kind === "video" && clip.audio && clip.audio.mute === false) {
+        argv.push("-ss", Math.max(0, clip.offset).toFixed(3), "-t", clip.duration.toFixed(3), "-i", file);
+        inputs.push({
+          kind: "audio",
+          index: inputIndex++,
+          audioClip: {
+            id: `${clip.id}-audio`,
+            sourceId: clip.sourceId,
+            start: clip.start,
+            duration: clip.duration,
+            offset: clip.offset,
+            gain: clip.audio.gain ?? 1,
+            fadeIn: clip.fadeIn || 0,
+            fadeOut: clip.fadeOut || 0,
+          },
+        });
+      }
+    }
+  }
+
   const filters: string[] = [];
 
   // Vidéo : un filtre par clip puis empilement par overlay
@@ -827,12 +917,36 @@ export async function renderMontage(
     vIndex++;
   });
 
-  // Sous-titres incrustés (libass) ou simple conversion de format
+  // Incrustations : empilées après la piste principale, dans l'ordre des calques.
+  for (const overlay of overlayInputs) {
+    const { chain, position } = overlayChain(overlay.clip, overlay.clip.duration, { width: W, height: H });
+    filters.push(`[${overlay.index}:v]${chain}[ov${vIndex}]`);
+    const outLabel = `vo${vIndex}`;
+    const end = overlay.clip.start + overlay.clip.duration;
+    filters.push(
+      `[${lastVideo}][ov${vIndex}]overlay=${position}:enable='between(t,${overlay.clip.start.toFixed(3)},${end.toFixed(3)})':eof_action=pass:shortest=0[${outLabel}]`
+    );
+    lastVideo = outLabel;
+    vIndex++;
+  }
+
+  // Sous-titres et textes libres incrustés (libass), ou simple conversion de format.
   const subtitleFile = await writeSubtitles(project, W, H);
-  if (subtitleFile) {
-    // Les TTF sont dans ./ttf (sous-dossier) : libass ne scanne plus le .ass lui-même.
-    filters.push(`[${lastVideo}]ass=filename=${subtitleFile}:fontsdir=ttf[vout]`);
-    onProgress?.(0.01, "Sous-titres incrustés (libass + polices locales)");
+  const textFile = await writeTexts(project, W, H);
+  const assLayers: string[] = [];
+  if (subtitleFile) assLayers.push(`ass=filename=${subtitleFile}:fontsdir=ttf`);
+  if (textFile) assLayers.push(`ass=filename=${textFile}:fontsdir=ttf`);
+  if (assLayers.length) {
+    // Les TTF sont dans ./ttf (sous-dossier) : libass ne scanne plus les .ass eux-mêmes.
+    filters.push(`[${lastVideo}]${assLayers.join(",")},format=yuv420p[vout]`);
+    onProgress?.(
+      0.01,
+      assLayers.length > 1
+        ? "Sous-titres et textes incrustés (libass + polices locales)"
+        : subtitleFile
+          ? "Sous-titres incrustés (libass + polices locales)"
+          : "Textes incrustés (libass + polices locales)"
+    );
   } else {
     filters.push(`[${lastVideo}]format=yuv420p[vout]`);
   }
@@ -923,7 +1037,12 @@ export async function renderMontage(
       }
     },
   });
-  if (res.code !== 0) throw new Error(`ffmpeg (rendu) a échoué : ${res.stderr.slice(-800)}`);
+  if (res.code !== 0) {
+    // Diagnostic : la première ligne d'erreur est la plus utile, la fin montre le détail.
+    const lines = res.stderr.split(/\r?\n/).filter(Boolean);
+    const first = lines.find((line) => /error|Invalid|No such|Unable|Cannot|not found/i.test(line)) || lines[0] || "";
+    throw new Error(`ffmpeg (rendu) a échoué : ${first}\n${res.stderr.slice(-1600)}`);
+  }
   onProgress?.(1, "Rendu terminé");
   return { file: outName, url: `/media/${project.id}/${encodeURIComponent(outName)}`, duration };
 }

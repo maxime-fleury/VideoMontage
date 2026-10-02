@@ -78,11 +78,75 @@ export function fmtDuration(t) {
   return `${m} min ${String(s).padStart(2, "0")} s`;
 }
 
+/** Tâche suivie en ce moment : cible du bouton « Annuler ». */
+let watchedJob = null;
+let cancelWired = false;
+const watchHandlers = new Set();
+
+/** Prévient quand une tâche commence ou finit d'être suivie (boutons d'annulation). */
+export function onJobWatched(fn) {
+  watchHandlers.add(fn);
+  fn(!!watchedJob);
+  return () => watchHandlers.delete(fn);
+}
+
+/**
+ * Bouton « Annuler » clé en main : visible seulement pendant qu'une tâche tourne.
+ * Utilisé dans les modales (rendu, montage auto) en plus de la barre du haut.
+ */
+export function cancelJobButton(label = "⏹ Annuler la tâche") {
+  const btn = el("button", { class: "ghost", text: label, hidden: true });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    await cancelWatchedJob();
+    btn.disabled = false;
+  });
+  onJobWatched((watched) => {
+    btn.hidden = !watched;
+    btn.disabled = false;
+  });
+  return btn;
+}
+
+function syncCancelButton() {
+  const btn = document.getElementById("jobCancel");
+  if (btn) {
+    btn.hidden = !watchedJob;
+    if (!cancelWired) {
+      cancelWired = true;
+      btn.addEventListener("click", cancelWatchedJob);
+    }
+  }
+  for (const fn of watchHandlers) {
+    try {
+      fn(!!watchedJob);
+    } catch {}
+  }
+}
+
+/** Interrompt la tâche en cours (tue les processus ffmpeg/whisper côté serveur). */
+export async function cancelWatchedJob() {
+  const id = watchedJob;
+  if (!id) return;
+  const btn = document.getElementById("jobCancel");
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/api/jobs/${id}/cancel`, { method: "POST" });
+    toast("Tâche annulée", "info");
+  } catch (e) {
+    toast(`Annulation impossible : ${e.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /** Suit une tâche serveur via SSE avec repli sur du polling. */
 export function watchJob(jobId, onUpdate) {
   let closed = false;
   let pollTimer = null;
   let source = null;
+  watchedJob = jobId;
+  syncCancelButton();
 
   const stop = () => {
     closed = true;
@@ -90,12 +154,23 @@ export function watchJob(jobId, onUpdate) {
       source?.close();
     } catch {}
     if (pollTimer) clearTimeout(pollTimer);
+    if (watchedJob === jobId) {
+      watchedJob = null;
+      syncCancelButton();
+    }
   };
 
-  const handle = (job) => {
+  const handle = (raw) => {
     if (closed) return;
+    // Une tâche annulée est présentée comme un échec aux écrans existants : les
+    // boutons se réactivent et aucun résultat partiel n'est proposé. Le drapeau
+    // `cancelled` permet un message plus juste là où c'est utile.
+    const job =
+      raw.status === "cancelled" ? { ...raw, status: "error", error: "Tâche annulée", cancelled: true } : raw;
     onUpdate(job);
-    if (job.status !== "running") stop();
+    // « waiting » = pause sur un point de contrôle : le suivi continue, la tâche
+    // reprendra au clic sur Continuer (resumeJob).
+    if (job.status !== "running" && job.status !== "waiting") stop();
   };
 
   const startPolling = () => {
@@ -134,6 +209,11 @@ export function watchJob(jobId, onUpdate) {
   return stop;
 }
 
+/** Reprend une tâche arrêtée sur un point de contrôle. */
+export async function resumeJob(jobId, data, action = "resume") {
+  return api(`/api/jobs/${jobId}/resume`, { method: "POST", body: { data, action } });
+}
+
 /** Dialogue modal simple. render(close) renvoie le contenu. */
 export function openModal(render) {
   const backdrop = $("#modal");
@@ -161,6 +241,7 @@ export function busy(label, progress = 0, detail = "") {
   const status = $("#jobStatus");
   if (!status) return;
   status.hidden = false;
+  syncCancelButton();
   const text = $("#jobText");
   if (text) text.textContent = `${label}${detail ? ` — ${detail}` : ""}`;
   const bar = $("#jobBar");
@@ -170,4 +251,5 @@ export function busy(label, progress = 0, detail = "") {
 export function clearBusy() {
   const status = $("#jobStatus");
   if (status) status.hidden = true;
+  syncCancelButton();
 }
