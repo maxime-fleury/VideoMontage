@@ -3,7 +3,7 @@ import { motionCatalog } from "../src/lib/motions";
 // les modules testés sont ceux servis au navigateur (public/js), pas des copies
 import { evalExpr, fillTemplate } from "../public/js/expr";
 import { overlayAlpha, overlayGeometry } from "../public/js/geometry";
-import { keyframeExprs, keysFromClip } from "../public/js/keyframes";
+import { curveSamples, keyframeExprs, keysFromClip, piecewiseExpr, MAX_POWER, MIN_POWER } from "../public/js/keyframes";
 import { applyChroma, contentRect, despill, hexToRgb, keyAlpha } from "../public/js/chroma";
 import { DEFAULT_W, MIN_COL, columnLayout, columnWidth } from "../public/js/layoutmath";
 import { reconcile } from "../public/js/state";
@@ -137,6 +137,74 @@ describe("images clés des incrustations", () => {
     const frames = keyframeExprs(animated(), 4, "(N/25.000)").op;
     expect(frames).toContain("N/25.000");
     expect(evalExpr(frames, { N: 0 })).toBeCloseTo(1, 9);
+  });
+
+  test("les courbes de vitesse changent la progression, sans changer les bornes", () => {
+    const at = (ease, power, t) => evalExpr(piecewiseExpr([
+      { t: 0, value: 0 },
+      { t: 1, value: 1, ease, power },
+    ], "linear"), { t });
+
+    // bornes toujours tenues, quelle que soit la courbe
+    for (const ease of ["linear", "smooth", "power", "hold"]) {
+      expect(at(ease, 2, 0)).toBeCloseTo(0, 9);
+      expect(at(ease, 2, 1)).toBeCloseTo(1, 9);
+      expect(at(ease, 2, 2)).toBeCloseTo(1, 9);
+    }
+    expect(at("linear", 2, 0.5)).toBeCloseTo(0.5, 9);
+    expect(at("smooth", 2, 0.5)).toBeCloseTo(0.5, 9);
+    expect(at("smooth", 2, 0.25)).toBeCloseTo(0.15625, 9); // 3p² − 2p³
+    // puissance > 1 : départ lent ; puissance < 1 : départ rapide
+    expect(at("power", 3, 0.5)).toBeCloseTo(0.125, 9);
+    expect(at("power", 0.5, 0.25)).toBeCloseTo(0.5, 9);
+    // maintien : la valeur tient jusqu'à l'image clé, puis saute
+    expect(at("hold", 2, 0.99)).toBe(0);
+    expect(at("hold", 2, 1)).toBe(1);
+  });
+
+  test("la courbe propre à une image clé prime sur la courbe par défaut du clip", () => {
+    const keys = [
+      { t: 0, value: 0 },
+      { t: 1, value: 1, ease: "hold" },
+      { t: 2, value: 2 },
+    ];
+    const expression = piecewiseExpr(keys, "linear");
+    expect(evalExpr(expression, { t: 0.5 })).toBe(0); // segment 1 : maintien (courbe portée par l'image clé #2)
+    expect(evalExpr(expression, { t: 1.5 })).toBeCloseTo(1.5, 9); // segment 2 : linéaire (courbe par défaut)
+    // le segment 2 n'a pas de courbe propre : il suit la courbe par défaut du clip
+    const smooth = piecewiseExpr(keys, "smooth");
+    expect(evalExpr(smooth, { t: 1.25 })).toBeCloseTo(1.15625, 9); // 3p² − 2p³ à p = 0.25
+    expect(evalExpr(smooth, { t: 1.5 })).toBeCloseTo(1.5, 9);
+  });
+
+  test("les courbes restent dans les bornes annoncées à l'éditeur", () => {
+    const samples = curveSamples("power", 99);
+    expect(samples[0]).toBeCloseTo(0, 9);
+    expect(samples[samples.length - 1]).toBeCloseTo(1, 9);
+    for (const value of samples) {
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(value).toBeLessThanOrEqual(1);
+    }
+    // l'exposant est borné : un réglage extrême ne fige pas la courbe
+    const clamped = curveSamples("power", MAX_POWER + 10);
+    expect(clamped[Math.floor(clamped.length / 2)]).toBeGreaterThan(0);
+    const tiny = curveSamples("power", MIN_POWER - 10);
+    expect(tiny[1]).toBeGreaterThan(0);
+    expect(tiny[tiny.length - 1]).toBeCloseTo(1, 9);
+  });
+
+  test("les expressions de courbe n'utilisent ni < ni > (parseur ffmpeg)", () => {
+    for (const ease of ["linear", "smooth", "power", "hold"]) {
+      const expression = piecewiseExpr([
+        { t: 0, value: 0 },
+        { t: 1.5, value: 1, ease, power: 2 },
+        { t: 3, value: 0.2, ease },
+      ], "linear");
+      expect(/[<>]/.test(expression)).toBe(false);
+      for (const t of [0, 0.4, 1.5, 2.2, 3, 5]) {
+        expect(Number.isFinite(evalExpr(expression, { t }))).toBe(true);
+      }
+    }
   });
 
   test("keysFromClip part de l'état actuel et couvre toute la durée", () => {

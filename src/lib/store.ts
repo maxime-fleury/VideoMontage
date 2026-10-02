@@ -46,11 +46,27 @@ export function defaultChroma(over: Partial<Chroma> = {}): Chroma {
  * davantage pour un trajet en zigzag.
  */
 export type Keyframe = {
+  /**
+   * Identifiant stable : sans lui, la fusion d'identité (`adoptProject`) remplace
+   * l'objet à chaque réponse du serveur, et un réglage fait juste avant la
+   * sauvegarde serait perdu.
+   */
+  id: string;
   t: number; // secondes depuis le début de l'incrustation
   box: Box;
   rotation: number;
   opacity: number;
+  /**
+   * Courbe de vitesse du segment qui **arrive** à cette image clé : linéaire,
+   * douce, puissance réglable (`power`) ou maintien puis saut. Absente = la
+   * courbe par défaut du clip.
+   */
+  ease?: EaseName;
+  /** exposant de la courbe « power » (0.15 = freine fort, 6 = accélère fort) */
+  power?: number;
 };
+
+export type EaseName = "linear" | "smooth" | "power" | "hold";
 
 export type Range = { start: number; end: number };
 

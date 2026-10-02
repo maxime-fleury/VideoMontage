@@ -29,7 +29,9 @@ export async function ensureDir(...dirs: string[]) {
 }
 
 export function json(data: unknown, status = 200) {
-  return Response.json(data, { status });
+  // Les réponses de l'API sont dynamiques : sans cet en-tête, le navigateur peut
+  // servir un projet périmé depuis son cache après une modification.
+  return Response.json(data, { status, headers: { "cache-control": "no-store" } });
 }
 
 export function badRequest(message: string, status = 400) {

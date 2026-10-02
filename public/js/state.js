@@ -13,6 +13,8 @@ export const S = {
   selectedTextId: null, // texte sélectionné sur l'aperçu
   motions: null, // catalogue des placements/mouvements (GET /api/motions)
   showOverlays: true, // incrustations et textes visibles dans l'aperçu
+  showMotionPath: true, // tracé du déplacement des images clés dans l'aperçu
+  overlayPathClipId: null, // incrustation dont on dessine le tracé (éditée ou sélectionnée)
   activeWord: null, // { word, start, end, segId }
   search: { query: "", provider: "web", results: [], loading: false, errors: [] },
   transcriptsDirty: false,

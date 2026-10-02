@@ -88,6 +88,24 @@ describe("validation des incrustations et des textes", () => {
     expect(normalizeOverlayClip({}).ease).toBe("linear");
   });
 
+  test("la courbe de vitesse d'une image clé est validée", () => {
+    const clip = normalizeOverlayClip({
+      keys: [
+        { t: 0, ease: "n'importe quoi", power: 99 },
+        { t: 1, ease: "power", power: 0.001 },
+        { t: 2, ease: "hold" },
+      ],
+    });
+    // une courbe inconnue est ignorée (le segment suit la courbe par défaut)…
+    expect(clip.keys![0].ease).toBeUndefined();
+    // …mais un exposant valide est conservé, borné
+    expect(clip.keys![0].power).toBeCloseTo(6, 6);
+    expect(clip.keys![1].ease).toBe("power");
+    expect(clip.keys![1].power).toBeCloseTo(0.15, 6);
+    expect(clip.keys![2].ease).toBe("hold");
+    expect(clip.keys![2].power).toBeUndefined();
+  });
+
   test("une clé chromatique est bornée et retombe sur le vert", () => {
     const chroma = normalizeChroma({ enabled: true, color: "rouge", similarity: 4, blend: -2, despill: false });
     expect(chroma.enabled).toBe(true);

@@ -1006,6 +1006,40 @@ a { color: var(--violet-3); }
 /* Pipette de la clé chromatique. */
 #stage.picking { cursor: crosshair; }
 #stage.picking .stage-overlay { pointer-events: none; }
+
+/* Tracé du déplacement des images clés (SVG par-dessus l'aperçu). */
+.stage-path { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.stage-path-line {
+  fill: none;
+  stroke: rgba(34, 211, 238, 0.85);
+  stroke-width: 2;
+  stroke-dasharray: 7 6;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 4px rgba(34, 211, 238, 0.6));
+}
+.stage-path-marks { position: absolute; inset: 0; pointer-events: none; }
+.stage-path-dot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  background: linear-gradient(135deg, var(--violet-1), var(--cyan));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s, box-shadow 0.15s;
+  pointer-events: auto;
+}
+.stage-path-dot:hover { opacity: 1; }
+.stage-path-dot.current {
+  opacity: 1;
+  box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.35), 0 4px 14px rgba(5, 2, 14, 0.6);
+}
 .stage-text {
   position: absolute;
   cursor: move;
@@ -1094,3 +1128,23 @@ a { color: var(--violet-3); }
 .kf-row.current { border-color: rgba(34, 211, 238, 0.6); background: rgba(34, 211, 238, 0.12); }
 .kf-row .kf-label { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; }
 .kf-row button.ghost.small { padding: 2px 7px; font-size: 12px; }
+
+/* courbe de vitesse d'un segment entre deux images clés */
+.kf-segment {
+  flex-wrap: wrap;
+  gap: 8px;
+  background: rgba(34, 211, 238, 0.06);
+  border-color: rgba(34, 211, 238, 0.2);
+  margin: -1px 0 2px 14px;
+}
+.kf-segment .kf-label { flex: 1 1 100%; font-size: 11px; color: var(--muted); }
+.kf-curve {
+  flex: 0 0 auto;
+  width: 132px;
+  height: 56px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  background: rgba(0, 0, 0, 0.25);
+}
+.kf-segment select { flex: 1 1 140px; min-width: 0; }
+.kf-segment .ctrl { flex: 1 1 100%; margin: 0; }

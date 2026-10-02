@@ -1,7 +1,7 @@
 import { S, duration, emit, on, sourceById, allAudioClips } from "./state.js";
-import { $, clamp } from "./api.js";
+import { $, clamp, newId } from "./api.js";
 import { overlayAlpha, overlayGeometry } from "./geometry.js";
-import { hasKeyframes, keyframeAt, MAX_KEYFRAMES } from "./keyframes.js";
+import { hasKeyframes, keyframeAt, keyframeCenter, MAX_KEYFRAMES } from "./keyframes.js";
 import { applyChroma, canvasSize, contentRect, rgbToHex } from "./chroma.js";
 
 /** Résolution de travail du canvas de clé chromatique (aperçu fluide). */
@@ -199,6 +199,17 @@ export class Stage {
     });
 
     on("pick-color", (payload = {}) => this.startPick(payload));
+
+    // Tracé du déplacement : on suit l'incrustation dont l'éditeur est ouvert ou
+    // qui vient d'être sélectionnée dans la timeline.
+    on("selection-clip", ({ id, kind } = {}) => {
+      S.overlayPathClipId = kind === "overlay" ? id : null;
+      this.updateMotionPath(S.playhead);
+    });
+    on("edit-overlay", ({ clipId }) => {
+      S.overlayPathClipId = clipId || null;
+      this.updateMotionPath(S.playhead);
+    });
 
     // Pipette de la clé chromatique : un clic sur un média d'incrustation renvoie
     // la couleur du pixel exact (avant traitement), Échap annule.
@@ -700,7 +711,89 @@ export class Stage {
       }
     }
     this.updateOverlays(t);
+    this.updateMotionPath(t);
     this.updateTexts(t);
+  }
+
+  /**
+   * Tracé du déplacement d'une incrustation animée : la trajectoire entre les
+   * images clés, jalonnée de pastilles numérotées. C'est le même centre que
+   * celui utilisé par le rendu (`cx`/`cy` = case + moitié de la taille), donc le
+   * dessin tombe exactement sur le chemin exporté.
+   *
+   * Un clic sur une pastille amène la tête de lecture sur son image clé ; la
+   * pastille courante est mise en évidence pendant la lecture.
+   */
+  updateMotionPath(t) {
+    const clip = (S.project?.overlayLayers || [])
+      .flatMap((layer) => layer.clips || [])
+      .find((item) => item.id === S.overlayPathClipId);
+    const keys = clip && hasKeyframes(clip) ? [...clip.keys].sort((a, b) => a.t - b.t) : [];
+    const visible = !!clip && keys.length > 1 && S.showMotionPath !== false && this.showIncrustations;
+    if (!visible) {
+      if (this.pathLayer) this.pathLayer.svg.style.display = "none";
+      this.pathSignature = null;
+      return;
+    }
+    const layer = this.ensurePathLayer();
+    layer.svg.style.display = "block";
+    const { width, height } = this.frameSize();
+    const signature = `${clip.id}|${width.toFixed(1)}x${height.toFixed(1)}|${keys
+      .map((key) => `${key.t.toFixed(3)}:${key.box.x.toFixed(4)},${key.box.y.toFixed(4)},${key.box.w.toFixed(4)},${key.box.h.toFixed(4)}`)
+      .join(";")}`;
+    if (signature === this.pathSignature) {
+      this.highlightPathKey(clip, keys, t);
+      return;
+    }
+    this.pathSignature = signature;
+    layer.svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const points = keys.map((key) => {
+      const center = keyframeCenter(key, clip.box);
+      return { x: center.x * width, y: center.y * height, key, center };
+    });
+    layer.line.setAttribute("points", points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "));
+    layer.marks.innerHTML = "";
+    layer.dots = points.map((point, index) => {
+      const dot = document.createElement("button");
+      dot.className = "stage-path-dot";
+      dot.type = "button";
+      dot.textContent = String(index + 1);
+      dot.title = `Image clé ${index + 1} · ${point.key.t.toFixed(2)} s — cliquer pour y aller`;
+      dot.style.left = `${point.center.x * 100}%`;
+      dot.style.top = `${point.center.y * 100}%`;
+      dot.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        S.overlayPathClipId = clip.id;
+        emit("seek", Math.max(0, clip.start + point.key.t));
+      });
+      layer.marks.append(dot);
+      return dot;
+    });
+    this.highlightPathKey(clip, keys, t);
+  }
+
+  highlightPathKey(clip, keys, t) {
+    const layer = this.pathLayer;
+    if (!layer?.dots) return;
+    const local = clamp(t - clip.start, 0, clip.duration);
+    const current = keyframeAt(clip, local, 0.05);
+    layer.dots.forEach((dot, index) => dot.classList.toggle("current", current === keys[index]));
+  }
+
+  ensurePathLayer() {
+    if (this.pathLayer) return this.pathLayer;
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("class", "stage-path");
+    const line = document.createElementNS(ns, "polyline");
+    line.setAttribute("class", "stage-path-line");
+    svg.append(line);
+    const marks = document.createElement("div");
+    marks.className = "stage-path-marks";
+    this.container.append(svg, marks);
+    this.pathLayer = { svg, line, marks, dots: [] };
+    return this.pathLayer;
   }
 }
 
@@ -788,7 +881,7 @@ function wireOverlayDrag(stage, entry) {
         target = keys.reduce((best, key) => (!best || Math.abs(key.t - local) < Math.abs(best.t - local) ? key : best), null) || clip;
         return;
       }
-      target = { t: Number(local.toFixed(3)), box: { ...origin.box }, rotation: origin.rotation, opacity: origin.opacity };
+      target = { id: newId("kf"), t: Number(local.toFixed(3)), box: { ...origin.box }, rotation: origin.rotation, opacity: origin.opacity };
       clip.keys = [...keys, target].sort((a, b) => a.t - b.t);
     };
 

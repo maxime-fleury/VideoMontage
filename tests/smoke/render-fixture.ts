@@ -130,9 +130,10 @@ async function main() {
           fadeIn: 0,
           fadeOut: 0,
           // opacité animée → chemin geq (les filtres par pixel n'ont pas `t`)
+          // et courbe de puissance propre à l'image clé d'arrivée
           keys: [
             { t: 0, box: { x: 0.05, y: 0.05, w: 0.4, h: 0.4 }, rotation: 8, opacity: 1 },
-            { t: DURATION, box: { x: 0.05, y: 0.05, w: 0.4, h: 0.4 }, rotation: 8, opacity: 0.6 },
+            { t: DURATION, box: { x: 0.05, y: 0.05, w: 0.4, h: 0.4 }, rotation: 8, opacity: 0.6, ease: "power", power: 2.5 },
           ],
           ease: "smooth",
           audio: { mute: true, gain: 1 },
@@ -158,9 +159,11 @@ async function main() {
           motion: defaultMotion(),
           fadeIn: 0.1,
           fadeOut: 0.1,
-          // position **et** taille animées → scale eval=frame + x/y dépendant du temps
+          // position **et** taille animées → scale eval=frame + x/y dépendant du
+          // temps, avec une image clé intermédiaire en maintien puis saut
           keys: [
             { t: 0, box: { x: 0.7, y: 0.6, w: 0.2, h: 0.2 }, rotation: -10, opacity: 0.4 },
+            { t: DURATION / 2, box: { x: 0.62, y: 0.68, w: 0.24, h: 0.24 }, rotation: 0, opacity: 0.7, ease: "hold" },
             { t: DURATION, box: { x: 0.5, y: 0.7, w: 0.3, h: 0.3 }, rotation: 10, opacity: 0.9 },
           ],
           ease: "linear",

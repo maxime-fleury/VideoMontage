@@ -1,6 +1,10 @@
 import { clamp, newId, sanitizeText } from "./util";
 import { MOTIONS } from "./motions";
 import { defaultChroma, type Chroma, type Keyframe, type MotionPresetId, type OverlayClip, type OverlayLayer, type TextOverlay } from "./store";
+// Le plafond et les courbes vivent dans le module partagé avec l'aperçu : le
+// navigateur et le serveur interprètent les images clés de la même façon.
+import { EASE_IDS, MAX_KEYFRAMES, MAX_POWER, MIN_POWER } from "../../public/js/keyframes.js";
+export { MAX_KEYFRAMES };
 
 /**
  * Nombre maximal de pistes de superposition. Appliqué ici (donc pour toute
@@ -9,11 +13,6 @@ import { defaultChroma, type Chroma, type Keyframe, type MotionPresetId, type Ov
  * Le front garde la même valeur dans public/js/tracks.js.
  */
 export const MAX_OVERLAY_LAYERS = 3;
-
-// Le plafond d'images clés vit dans le module partagé avec l'aperçu : le
-// navigateur et le serveur comptent les images clés de la même façon.
-import { MAX_KEYFRAMES } from "../../public/js/keyframes.js";
-export { MAX_KEYFRAMES };
 
 /** Valide une clé chromatique reçue du navigateur. */
 export function normalizeChroma(raw: any): Chroma {
@@ -37,6 +36,8 @@ export function normalizeKeyframes(raw: any): Keyframe[] | undefined {
   return raw
     .slice(0, MAX_KEYFRAMES)
     .map((key) => ({
+      // identifiant stable : la fusion d'identité du navigateur s'appuie dessus
+      id: typeof key?.id === "string" && key.id ? key.id : newId("kf"),
       t: clamp(Number(key?.t) || 0, 0, 3600),
       box: {
         x: clamp(Number(key?.box?.x) || 0, -1, 2),
@@ -46,6 +47,11 @@ export function normalizeKeyframes(raw: any): Keyframe[] | undefined {
       },
       rotation: clamp(Number(key?.rotation) || 0, -180, 180),
       opacity: clamp(Number(key?.opacity ?? 1), 0, 1),
+      // courbe de vitesse du segment qui arrive à cette image clé (facultative)
+      ...(EASE_IDS.includes(key?.ease) ? { ease: key.ease } : {}),
+      ...(Number.isFinite(Number(key?.power))
+        ? { power: clamp(Number(key.power), MIN_POWER, MAX_POWER) }
+        : {}),
     }))
     .sort((a, b) => a.t - b.t);
 }

@@ -1,8 +1,18 @@
 import { S, emit, on, setProject, sourceById } from "./state.js";
-import { api, el, openModal, clamp, toast } from "./api.js";
+import { api, el, newId, openModal, clamp, toast } from "./api.js";
 import { findOverlayClip, removeOverlayClip } from "./tracks.js";
 import { chipRow, colorField, panel, selectField, slider, toggle } from "./controls.js";
-import { MAX_KEYFRAMES, hasKeyframes, keyframeAt, keysFromClip } from "./keyframes.js";
+import {
+  EASE_IDS,
+  MAX_KEYFRAMES,
+  MAX_POWER,
+  MIN_POWER,
+  clampPower,
+  curveSamples,
+  hasKeyframes,
+  keyframeAt,
+  keysFromClip,
+} from "./keyframes.js";
 import { overlayAlpha, overlayGeometry } from "./geometry.js";
 
 /**
@@ -106,7 +116,7 @@ export function openOverlayEditor(clipId) {
     if (keys.length >= MAX_KEYFRAMES) {
       return keys.reduce((best, key) => (!best || Math.abs(key.t - local) < Math.abs(best.t - local) ? key : best), null) || clip;
     }
-    const key = { t: Number(local.toFixed(3)), ...stateAt(clip, local) };
+    const key = { id: newId("kf"), t: Number(local.toFixed(3)), ...stateAt(clip, local) };
     clip.keys = [...keys, key].sort((a, b) => a.t - b.t);
     return key;
   };
@@ -296,11 +306,119 @@ export function openOverlayEditor(clipId) {
     keyInfo.textContent = `${(clip.keys || []).length} / ${MAX_KEYFRAMES} images clés · tête de lecture à ${local.toFixed(2)} s dans l'incrustation`;
   };
 
+  /**
+   * Les objets d'images clés sont remplacés par la réponse du serveur après
+   * chaque sauvegarde (`adoptProject`). Un gestionnaire doit donc retrouver
+   * l'objet vivant au moment du geste : on le repère par son instant, que les
+   * réglages de courbe ne changent jamais.
+   */
+  const liveKey = (key) => {
+    const keys = clip.keys || [];
+    if (key.id) {
+      const byId = keys.find((item) => item.id === key.id);
+      if (byId) return byId;
+    }
+    return keys.find((item) => Math.abs(item.t - key.t) < 1e-6) || key;
+  };
+
+  /**
+   * Courbe de vitesse du segment qui arrive à une image clé (la première image
+   * clé n'a pas de segment entrant : elle n'en reçoit pas).
+   */
+  const segmentControls = (key, index, previous, keys) => {
+    const curveSelect = el("select", { title: "Vitesse du segment précédent" });
+    for (const [value, label] of [
+      ["", `Héritée (${clip.ease === "linear" ? "linéaire" : "douce"})`],
+      ["linear", "Linéaire"],
+      ["smooth", "Douce"],
+      ["power", "Puissance"],
+      ["hold", "Maintien puis saut"],
+    ]) {
+      curveSelect.append(el("option", { value, text: label }));
+    }
+    curveSelect.value = EASE_IDS.includes(key.ease) ? key.ease : "";
+    const curveOf = (target) => (EASE_IDS.includes(target.ease) ? target.ease : clip.ease);
+    const power = slider("Exposant", {
+      min: MIN_POWER,
+      max: MAX_POWER,
+      step: 0.05,
+      value: clampPower(key.power),
+      format: (v) => `×${Number(v).toFixed(2)}`,
+      hint: `Supérieur à 1 : départ lent, accélération. Inférieur à 1 : départ rapide, freinage.`,
+      onChange: (v) => {
+        const target = liveKey(key);
+        target.ease = "power";
+        target.power = v;
+        curveSelect.value = "power";
+        power.node.hidden = false;
+        drawCurve(target);
+        touch();
+      },
+    });
+    power.node.hidden = curveOf(key) !== "power";
+    curveSelect.addEventListener("change", () => {
+      const target = liveKey(key);
+      if (curveSelect.value) {
+        target.ease = curveSelect.value;
+        if (curveSelect.value === "power") target.power = clampPower(target.power);
+      } else {
+        delete target.ease;
+        delete target.power;
+      }
+      power.node.hidden = curveOf(target) !== "power";
+      if (!power.node.hidden) power.set(clampPower(target.power));
+      drawCurve(target);
+      touch();
+      refreshKeys();
+    });
+
+    // Petit graphe : il échantillonne l'expression réellement utilisée au rendu,
+    // donc ce qui est dessiné ici est la vitesse qui sortira de l'export.
+    const graph = el("canvas", { class: "kf-curve", width: 132, height: 56, title: "Courbe de vitesse du segment (0 → 1)" });
+    const ctx = graph.getContext("2d");
+    const drawCurve = (target = liveKey(key)) => {
+      const ease = curveOf(target) === "smooth" ? "smooth" : curveOf(target);
+      const samples = curveSamples(ease, clampPower(target.power), 120);
+      ctx.clearRect(0, 0, graph.width, graph.height);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+      ctx.lineWidth = 1;
+      for (const ratio of [0.25, 0.5, 0.75]) {
+        ctx.beginPath();
+        ctx.moveTo(0, Math.round(graph.height * ratio) + 0.5);
+        ctx.lineTo(graph.width, Math.round(graph.height * ratio) + 0.5);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = "rgba(34, 211, 238, 0.95)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      samples.forEach((value, i) => {
+        const x = (i / (samples.length - 1)) * (graph.width - 2) + 1;
+        const y = graph.height - value * (graph.height - 4) - 2;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    };
+    drawCurve();
+
+    const row = el("div", { class: "kf-row kf-segment", "data-t": String(key.t), "data-key": key.id || "" }, [
+      el("span", { class: "kf-label", text: `Segment ${index} → ${index + 1} · ${(key.t - previous.t).toFixed(2)} s` }),
+      graph,
+      curveSelect,
+      power.node,
+    ]);
+    return row;
+  };
+
   const refreshKeys = () => {
     keyList.innerHTML = "";
     const keys = (clip.keys || []).slice().sort((a, b) => a.t - b.t);
+    // Les images clés chargées d'un ancien projet n'ont pas encore d'identifiant :
+    // on leur en donne un ici, pour que les sauvegardes ne remplacent plus les
+    // objets sous les doigts de l'éditeur.
+    for (const key of keys) if (!key.id) key.id = newId("kf");
     keys.forEach((key, index) => {
-      const row = el("div", { class: "kf-row", "data-t": String(key.t) }, [
+      const row = el("div", { class: "kf-row", "data-t": String(key.t), "data-key": key.id || "" }, [
         el("span", { class: "kf-label", text: `#${index + 1} · ${key.t.toFixed(2)} s` }),
         el("button", {
           class: "ghost small",
@@ -317,7 +435,11 @@ export function openOverlayEditor(clipId) {
               toast("Garde au moins une image clé — ou désactive les images clés", "error");
               return;
             }
-            clip.keys = (clip.keys || []).filter((item) => item !== key);
+            // suppression par identifiant (repli sur l'instant) : l'objet peut
+            // avoir été remplacé par une sauvegarde entre-temps
+            clip.keys = (clip.keys || []).filter((item) =>
+              key.id ? item.id !== key.id : Math.abs(item.t - key.t) > 1e-6
+            );
             touch();
             refreshKeys();
             highlightKeys();
@@ -325,6 +447,7 @@ export function openOverlayEditor(clipId) {
         }),
       ]);
       keyList.append(row);
+      if (index > 0) keyList.append(segmentControls(key, index, keys[index - 1], keys));
     });
     if (!keys.length) keyList.append(el("div", { class: "muted", style: { fontSize: "12px" }, text: "Aucune image clé." }));
     highlightKeys();
@@ -348,7 +471,7 @@ export function openOverlayEditor(clipId) {
           toast(`Maximum ${MAX_KEYFRAMES} images clés par incrustation`, "error", 6000);
           return;
         }
-        clip.keys = [...keys, { t: Number(local.toFixed(3)), ...state }].sort((a, b) => a.t - b.t);
+        clip.keys = [...keys, { id: newId("kf"), t: Number(local.toFixed(3)), ...state }].sort((a, b) => a.t - b.t);
         toast(`Image clé posée à ${local.toFixed(2)} s`, "ok", 3500);
       }
       touch();
@@ -390,7 +513,7 @@ export function openOverlayEditor(clipId) {
       ]);
 
   const ease = selectField(
-    "Courbe entre les images clés",
+    "Courbe par défaut",
     [
       { value: "smooth", label: "Doux (départ et arrivée progressifs)" },
       { value: "linear", label: "Linéaire (vitesse constante)" },
@@ -399,8 +522,15 @@ export function openOverlayEditor(clipId) {
     (value) => {
       clip.ease = value;
       touch();
-    }
+      refreshKeys();
+    },
+    "Utilisée par les segments sans courbe propre"
   );
+
+  const pathToggle = toggle("Afficher le tracé du déplacement", S.showMotionPath !== false, (value) => {
+    S.showMotionPath = value;
+    emit("render");
+  }, "Trace la trajectoire et numérote les images clés dans l'aperçu");
 
   const keySection = el("div", {}, keyframed
     ? [
@@ -409,6 +539,7 @@ export function openOverlayEditor(clipId) {
         keyInfo,
         el("div", { class: "ctrl-row", style: { marginTop: "6px" } }, [addKey]),
         ease.node,
+        pathToggle.node,
         keyToggle,
       ]
     : [

@@ -64,9 +64,18 @@ Whisper s'installe depuis l'app (bouton ⚙️ ou ⬇️ dans le panneau latéra
      courante (celle de la tête de lecture) et en pose une nouvelle si tu places
      la tête ailleurs. Poignée ↖ pour la taille, poignée ronde pour l'angle,
      snappé sur 15° (`Alt` = libre) ; 📍 pose une image clé à la tête de lecture,
-     la liste permet d'y aller ou de la supprimer, le curseur de courbe choisit
-     entre *doux* (départ/arrivée progressifs) et *linéaire* (12 images clés au
-     maximum, au-delà on règle la plus proche).
+     la liste permet d'y aller ou de la supprimer (12 images clés au maximum,
+     au-delà on règle la plus proche).
+   - **Courbes de vitesse** : sous chaque image clé, le segment qui y arrive a sa
+     propre courbe — *linéaire*, *douce* (smoothstep), *puissance* avec exposant
+     réglable (au-dessus de 1 : départ lent puis accélération ; en dessous :
+     départ vif puis freinage) ou *maintien puis saut*. Chaque segment affiche un
+     petit graphe qui **échantillonne l'expression réellement utilisée par
+     l'export** : la vitesse dessinée est celle qui sortira du rendu. Un segment
+     sans courbe propre suit la courbe par défaut du clip.
+   - **Tracé du déplacement** : l'aperçu dessine le **chemin** entre les images
+     clés, avec des pastilles numérotées (clic = aller à l'image clé, la pastille
+     courante s'allume pendant la lecture) ; la case `Afficher le tracé` le coupe.
    - **Clé chromatique** (fond vert ou bleu) : par média, donc valable partout
      où il est incrusté. « 💧 Pipette sur l'aperçu » : l'éditeur se ferme, tu
      cliques le fond dans l'aperçu, il se rouvre avec la couleur choisie. Puis
@@ -206,6 +215,9 @@ Ils couvrent aussi **le front** (les modules de `public/js` sont testés tels
 qu'ils sont servis au navigateur) :
 
 - géométrie de l'aperçu (centre stable, dérives, fondus, gabarit inconnu) ;
+- images clés et **courbes de vitesse** (bornes tenues quelle que soit la courbe,
+  courbe propre à un segment qui prime sur celle du clip, expressions sans
+  opérateur `<`/`>` — ils cassent le parseur d'expressions de ffmpeg) ;
 - largeurs de colonnes (proportionnelles : masquer un panneau ne laisse pas de vide) ;
 - fusion d'identité des projets (`adoptProject` : un objet connu garde son identité) ;
 - moteur de mots-clés (élisions, noms concrets retenus, verbes et adverbes écartés) ;

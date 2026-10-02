@@ -27,6 +27,7 @@ const FUNCTIONS = {
   sin: Math.sin,
   cos: Math.cos,
   sqrt: Math.sqrt,
+  pow: Math.pow,
   lt: cmp((a, b) => a < b),
   gt: cmp((a, b) => a > b),
   lte: cmp((a, b) => a <= b),
