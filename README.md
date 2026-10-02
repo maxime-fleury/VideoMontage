@@ -58,6 +58,22 @@ Whisper s'installe depuis l'app (bouton ⚙️ ou ⬇️ dans le panneau latéra
    d'intensité, opacité, rotation, cadrage (remplir/entier) et fondus. Les
    incrustations se voient en direct dans l'aperçu (bouton 👁 pour les couper si
    la lecture saccade) et sont rendues par ffmpeg avec **les mêmes formules**.
+   - **Images clés** : « ✨ Activer les images clés » crée deux états (début et
+     fin) décrivant position, taille, rotation et opacité. Règle-les en glissant
+     l'incrustation **directement sur l'aperçu** : le geste vise l'image clé
+     courante (celle de la tête de lecture) et en pose une nouvelle si tu places
+     la tête ailleurs. Poignée ↖ pour la taille, poignée ronde pour l'angle,
+     snappé sur 15° (`Alt` = libre) ; 📍 pose une image clé à la tête de lecture,
+     la liste permet d'y aller ou de la supprimer, le curseur de courbe choisit
+     entre *doux* (départ/arrivée progressifs) et *linéaire* (12 images clés au
+     maximum, au-delà on règle la plus proche).
+   - **Clé chromatique** (fond vert ou bleu) : par média, donc valable partout
+     où il est incrusté. « 💧 Pipette sur l'aperçu » : l'éditeur se ferme, tu
+     cliques le fond dans l'aperçu, il se rouvre avec la couleur choisie. Puis
+     **similarité** (largeur de la plage rendue transparente), **mélange**
+     (netteté du bord) et **despill** (retire la teinte de l'écran sur les
+     contours). L'aperçu montre la transparence réelle sur un damier : le canvas
+     applique les formules exactes de `colorkey` et `despill` (`public/js/chroma.js`).
 7. **📝 Textes libres** : « + Texte » (ou `X`) crée un texte indépendant de la
    voix. Glisse-le, redimensionne-le et tourne-le **directement à la souris sur
    l'aperçu** (poignées sur le texte sélectionné, aimants du centre et des bords,
@@ -74,9 +90,15 @@ Whisper s'installe depuis l'app (bouton ⚙️ ou ⬇️ dans le panneau latéra
    sur les pistes, rogne par les poignées, ✂️ coupe un clip au niveau de la tête
    de lecture, ⤢ étends un clip jusqu'au suivant, `Ctrl`/`Maj` + clic pour
    sélectionner plusieurs morceaux et `Suppr` pour les retirer d'un coup. Pistes
-   audio multiples pour musique/bruitages (volume, fondus, boucle).
+   audio multiples pour musique/bruitages (volume, fondus, boucle). Quand tu
+   déplaces ou rognes un clip, son début (ou sa fin) **s'aimante aux frontières
+   des autres clips** (± 7 px) : plus besoin de viser au pixel près ; `Alt`
+   enfonce l'aimant.
 10. **💬 Sous-titres** : incrustation du texte (police, taille, couleurs, contour,
-   position, animation, mode karaoké) avec aperçu live dans la scène.
+   position, animation, mode karaoké) avec aperçu live dans la scène. Les sous-
+   titres se **téléchargent aussi en `.srt` et `.vtt`** (boutons dans la fenêtre
+   Sous-titres) : mêmes coupures que l'incrustation, timecodes par phrase, prêts
+   pour YouTube, Premiere ou DaVinci.
 11. **🤖 Montage automatique complet** (panneau à droite, ou « Montage complet »
     dans la barre de la voix) : une seule tâche enchaîne **silences →
     transcription → mots-clés → illustrations → sous-titres → export**. Elle
@@ -92,7 +114,9 @@ Whisper s'installe depuis l'app (bouton ⚙️ ou ⬇️ dans le panneau latéra
 Les exports sont **incrémentaux** : chaque clip est préparé une fois (recadrage,
 zoom, Ken Burns) et mis en cache dans `build/cache/`, donc un second export après
 quelques retouches est environ deux fois plus rapide. Le cache se purge seul au
-bout de trois semaines.
+bout de trois semaines, et le panneau **🧰 Outils → « Vider le cache des clips »**
+le vide à la demande (le nombre de fichiers et les octets libérés sont affichés) —
+utile après avoir remplacé un média ou pour récupérer de la place.
 
 ## Sécurité du travail
 
@@ -163,6 +187,15 @@ bun build src/index.ts --target=bun          # vérifie que le serveur compile
 bun build public/js/app.js --target=browser  # vérifie que le front compile
 ```
 
+Un **test de fumée du rendu** (`tests/render.test.ts`) monte un vrai projet d'une
+seconde dans un dossier temporaire (mire, incrustation sur fond vert avec opacité
+animée, incrustation déplacée/redimensionnée, voix), lance `renderMontage` — donc
+la chaîne ffmpeg complète, `colorkey`, `despill`, `geq`, `scale eval=frame`,
+`rotate` — puis relit le MP4 : durée, pistes, et transparence réelle d'une image
+extraite. C'est ce test qui garantit qu'on peut retoucher les filtres sans casser
+l'export (il a déjà attrapé un piège : les opérateurs `<` et `>` cassent le
+parseur d'expressions de ffmpeg, les images clés utilisent donc `lt()`).
+
 Les tests couvrent les **mouvements prédéfinis des incrustations** (les formules
 utilisées par ffmpeg et par l'aperçu doivent donner exactement les mêmes nombres),
 la génération des **textes libres** en ASS (échappement, timing, machine à écrire,
@@ -197,7 +230,10 @@ qu'ils sont servis au navigateur) :
   de la sortie : ce que tu déplaces dans l'aperçu est exactement ce qui est
   exporté, quelle que soit la résolution choisie. Les mouvements vivent dans
   `src/lib/motions.ts` (une seule définition, utilisée par ffmpeg et par
-  l'aperçu via `public/js/expr.js`).
+  l'aperçu via `public/js/expr.js`). Les **images clés** suivent le même
+  principe : `public/js/keyframes.js` écrit les expressions une seule fois, le
+  serveur les met dans les filtres ffmpeg et l'aperçu les évalue avec
+  `public/js/expr.js` — impossible que les deux divergent.
 - Le code est versionné par git ; les données locales (`data/`, médias, modèles)
   sont volontairement ignorées du dépôt (volumineuses).
 - Le serveur est découpé en modules : `src/routes/` (jobs, système, projets, voix,

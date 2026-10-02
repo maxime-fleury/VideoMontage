@@ -1,6 +1,15 @@
 import { S, duration, emit, on, sourceById, allAudioClips } from "./state.js";
 import { $, clamp } from "./api.js";
 import { overlayAlpha, overlayGeometry } from "./geometry.js";
+import { hasKeyframes, keyframeAt, MAX_KEYFRAMES } from "./keyframes.js";
+import { applyChroma, canvasSize, contentRect, rgbToHex } from "./chroma.js";
+
+/** Résolution de travail du canvas de clé chromatique (aperçu fluide). */
+const CHROMA_MAX_SIDE = 480;
+/** Résolution d'échantillonnage de la pipette (précision suffisante, instantané). */
+const PICK_MAX_SIDE = 720;
+/** Écart maximal (s) pour considérer qu'une image clé est « celle qu'on règle ». */
+const KEYFRAME_TOUCH = 0.3;
 
 // ---------------------------------------------------------------------------
 // Lecture audio : la voix compilée sert d'horloge, les autres pistes sont
@@ -188,6 +197,20 @@ export class Stage {
       this.rebuild();
       this.update(S.playhead);
     });
+
+    on("pick-color", (payload = {}) => this.startPick(payload));
+
+    // Pipette de la clé chromatique : un clic sur un média d'incrustation renvoie
+    // la couleur du pixel exact (avant traitement), Échap annule.
+    this.container.addEventListener("pointerdown", (event) => {
+      if (!this.picking) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.handlePick(event);
+    }, true);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.picking) this.cancelPick();
+    });
   }
 
   /** Dimensions en pixels d'un élément pointé sur le cadre réel. */
@@ -270,7 +293,13 @@ export class Stage {
     }
     for (const layer of layers) {
       for (const clip of layer.clips) {
-        if (this.overlayElements.has(clip.id)) continue;
+        if (this.overlayElements.has(clip.id)) {
+          const entry = this.overlayElements.get(clip.id);
+          entry.clip = clip;
+          entry.source = sourceById(clip.sourceId) || entry.source;
+          this.syncOverlayMedia(entry);
+          continue;
+        }
         const source = sourceById(clip.sourceId);
         if (!source) continue;
         const node = document.createElement("div");
@@ -290,8 +319,42 @@ export class Stage {
         media.style.objectFit = clip.fit === "contain" ? "contain" : "cover";
         node.append(media);
         this.container.append(node);
-        this.overlayElements.set(clip.id, { node, media, clip, source });
+        const entry = { node, media, clip, source, canvas: null, ctx: null };
+        this.overlayElements.set(clip.id, entry);
+        this.syncOverlayMedia(entry);
+        wireOverlayDrag(this, entry);
       }
+    }
+  }
+
+  /**
+   * Le canvas de clé chromatique n'existe que lorsque le média en a besoin : on
+   * l'ajoute/le retire au fil des réglages, sans reconstruire l'incrustation.
+   */
+  syncOverlayMedia(entry) {
+    const { node, media, clip, source } = entry;
+    const fit = clip.fit === "contain" ? "contain" : "cover";
+    media.style.objectFit = fit;
+    const chroma = source?.chroma;
+    const wanted = !!chroma?.enabled;
+    node.classList.toggle("chroma", wanted);
+    if (wanted && !entry.canvas) {
+      const canvas = document.createElement("canvas");
+      canvas.className = "chroma-canvas";
+      canvas.style.objectFit = fit;
+      node.append(canvas);
+      entry.canvas = canvas;
+      entry.ctx = null;
+      entry.stamp = null;
+      entry.drawnAt = 0;
+      this.drawChroma(entry, true);
+      return;
+    }
+    if (!wanted && entry.canvas) {
+      entry.canvas.remove();
+      entry.canvas = null;
+      entry.ctx = null;
+      entry.stamp = null;
     }
   }
 
@@ -463,14 +526,142 @@ export class Stage {
       node.style.width = `${geometry.w * 100}%`;
       node.style.height = `${geometry.h * 100}%`;
       node.style.opacity = String(overlayAlpha(clip, local));
-      node.style.transform = clip.rotation ? `rotate(${clip.rotation}deg)` : "";
+      node.style.transform = geometry.rotation ? `rotate(${geometry.rotation}deg)` : "";
       node.style.zIndex = String(4 + (clip.layerZ || 0));
+      node.style.pointerEvents = "auto";
+      node.classList.toggle("selected", S.selectedClipId === clip.id && S.selectedClipKind === "overlay");
+      ensureOverlayHandles(entry);
       if (media.tagName === "VIDEO") {
         const expected = (clip.offset || 0) + Math.max(0, local);
         if (Math.abs(media.currentTime - expected) > 0.35) media.currentTime = Math.max(0, expected);
         if (media.paused) media.play().catch(() => {});
       }
+      if (entry.canvas) this.drawChroma(entry);
     }
+  }
+
+  /**
+   * Aperçu fidèle de la transparence : le média est redessiné dans un canvas où
+   * l'on applique les mêmes formules que `colorkey` et `despill` (module chroma.js).
+   * Le canvas respecte `object-fit`, donc le cadrage est celui du rendu.
+   */
+  drawChroma(entry, force = false) {
+    const { media, canvas, source } = entry;
+    const chroma = source?.chroma;
+    if (!canvas || !chroma?.enabled) return;
+    const naturalW = media.videoWidth || media.naturalWidth || 0;
+    const naturalH = media.videoHeight || media.naturalHeight || 0;
+    if (!naturalW || !naturalH) return;
+    const size = canvasSize(naturalW, naturalH, CHROMA_MAX_SIDE);
+    if (canvas.width !== size.width || canvas.height !== size.height) {
+      canvas.width = size.width;
+      canvas.height = size.height;
+      entry.ctx = null;
+      force = true;
+    }
+    // Pas encore de flux décodé (métadonnées seules, saut de la tête de lecture) :
+    // redessiner viderait le canvas et ferait clignoter la transparence. On
+    // redessine dès que le média est prêt, même si la lecture est en pause.
+    const ready = media.tagName === "VIDEO" ? media.readyState >= 2 : !!media.naturalWidth;
+    if (!ready) {
+      this.redrawWhenReady(entry, media);
+      return;
+    }
+    const stamp = `${chroma.color}|${chroma.similarity}|${chroma.blend}|${chroma.despill}`;
+    const now = performance.now();
+    // Une image ne change pas : on ne la retraite que si les réglages ont bougé.
+    // Une vidéo doit être retraitée à chaque nouveau flux (≈ 30 img/s au maximum).
+    if (!force && entry.stamp === stamp) {
+      if (media.tagName !== "VIDEO" || now - (entry.drawnAt || 0) < 1000 / 30) return;
+    }
+    entry.ctx = entry.ctx || canvas.getContext("2d", { willReadFrequently: true });
+    const ctx = entry.ctx;
+    if (!ctx) return;
+    try {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(media, 0, 0, canvas.width, canvas.height);
+    } catch {
+      return;
+    }
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ctx.putImageData(applyChroma(image, chroma), 0, 0);
+    entry.stamp = stamp;
+    entry.drawnAt = now;
+  }
+
+  /** Redessine le canvas dès que le média a des pixels (une seule fois). */
+  redrawWhenReady(entry, media) {
+    if (entry.pendingDraw) return;
+    entry.pendingDraw = true;
+    const events = media.tagName === "VIDEO" ? ["loadeddata", "seeked", "canplay"] : ["load", "error"];
+    const redraw = () => {
+      entry.pendingDraw = false;
+      for (const event of events) media.removeEventListener(event, redraw);
+      this.drawChroma(entry, true);
+    };
+    for (const event of events) media.addEventListener(event, redraw, { once: true });
+  }
+
+  /**
+   * Couleur du média sous le curseur — la pipette de la clé chromatique.
+   * Renvoie { sourceId, color } ou null si aucun média d'incrustation n'est là.
+   */
+  sampleColorAt(clientX, clientY) {
+    const entries = [...this.overlayElements.values()].sort((a, b) => (a.clip.layerZ || 0) - (b.clip.layerZ || 0));
+    for (const entry of entries.reverse()) {
+      const { node, media, clip } = entry;
+      if (node.style.display === "none") continue;
+      const rect = node.getBoundingClientRect();
+      if (!rect.width || !rect.height) continue;
+      if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
+      const naturalW = media.videoWidth || media.naturalWidth || 0;
+      const naturalH = media.videoHeight || media.naturalHeight || 0;
+      if (!naturalW || !naturalH) continue;
+      const content = contentRect(naturalW, naturalH, rect.width, rect.height, clip.fit);
+      const x = clientX - rect.left - content.left;
+      const y = clientY - rect.top - content.top;
+      if (x < 0 || y < 0 || x > content.width || y > content.height) continue;
+      const size = canvasSize(naturalW, naturalH, PICK_MAX_SIDE);
+      const canvas = document.createElement("canvas");
+      canvas.width = size.width;
+      canvas.height = size.height;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      try {
+        ctx.drawImage(media, 0, 0, size.width, size.height);
+        const px = Math.min(size.width - 1, Math.floor((x / content.width) * size.width));
+        const py = Math.min(size.height - 1, Math.floor((y / content.height) * size.height));
+        const data = ctx.getImageData(px, py, 1, 1).data;
+        return { sourceId: clip.sourceId, clipId: clip.id, color: rgbToHex({ r: data[0], g: data[1], b: data[2] }) };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /** Active la pipette : le prochain clic sur l'aperçu renvoie une couleur. */
+  startPick({ sourceId, clipId }) {
+    this.picking = { sourceId, clipId };
+    this.container.classList.add("picking");
+  }
+
+  cancelPick() {
+    if (!this.picking) return;
+    this.picking = null;
+    this.container.classList.remove("picking");
+    emit("pick-cancelled");
+  }
+
+  handlePick(event) {
+    const picked = this.sampleColorAt(event.clientX, event.clientY);
+    if (!picked) {
+      emit("pick-missed");
+      return;
+    }
+    this.picking = null;
+    this.container.classList.remove("picking");
+    // La couleur va au média pointé (WYSIWYG) : c'est celui dont l'éditeur se rouvre.
+    emit("color-picked", { ...picked });
   }
 
   update(t) {
@@ -511,6 +702,163 @@ export class Stage {
     this.updateOverlays(t);
     this.updateTexts(t);
   }
+}
+
+/** Incrustation vivante : les sauvegardes remplacent les objets du projet. */
+function liveOverlay(clipId) {
+  for (const layer of S.project?.overlayLayers || []) {
+    const found = layer.clips.find((clip) => clip.id === clipId);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** État complet (cadre, rotation, opacité) d'une incrustation à un instant local. */
+function overlayStateAt(clip, local) {
+  const geometry = overlayGeometry(clip, local, S.motions);
+  return {
+    box: { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h },
+    rotation: Number(geometry.rotation) || 0,
+    opacity: overlayAlpha(clip, local),
+  };
+}
+
+/**
+ * Poignées d'images clés : elles n'apparaissent que sur une incrustation
+ * animée, et servent à régler l'image clé courante au glisser.
+ */
+function ensureOverlayHandles(entry) {
+  const keyframed = hasKeyframes(entry.clip);
+  if (keyframed && !entry.handles) {
+    const resize = document.createElement("div");
+    resize.className = "overlay-handle corner";
+    resize.title = "Glisser pour changer la taille de l'image clé";
+    const rotate = document.createElement("div");
+    rotate.className = "overlay-handle rotate";
+    rotate.title = "Glisser pour faire pivoter l'image clé";
+    entry.node.append(resize, rotate);
+    entry.handles = { resize, rotate };
+  } else if (!keyframed && entry.handles) {
+    for (const handle of Object.values(entry.handles)) handle.remove();
+    entry.handles = null;
+  }
+}
+
+/**
+ * Glisser une incrustation sur l'aperçu.
+ *
+ * Sur une incrustation à images clés, le geste règle **l'image clé courante** :
+ * celle qui est à la tête de lecture, ou, s'il n'y en a pas, une nouvelle image clé
+ * posée exactement là où l'on se trouve (c'est le geste naturel « je la place ici »).
+ * Sur une incrustation sans image clé, le geste modifie directement sa case.
+ */
+function wireOverlayDrag(stage, entry) {
+  const begin = (event, mode) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const clip = liveOverlay(entry.clip.id) || entry.clip;
+    S.selectedClipId = clip.id;
+    S.selectedClipKind = "overlay";
+    S.selectedClipIds = [clip.id];
+    emit("selection-clip", { id: clip.id, kind: "overlay", ids: [clip.id] });
+
+    const rect = stage.container.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const local = clamp(S.playhead - clip.start, 0, clip.duration);
+    const state = overlayStateAt(clip, local);
+    const origin = { box: { ...state.box }, rotation: state.rotation, opacity: state.opacity };
+    // image clé visée (null = à créer au premier mouvement)
+    let target = hasKeyframes(clip) ? keyframeAt(clip, local, KEYFRAME_TOUCH) : clip;
+    let moved = false;
+
+    const pointer = (e) => ({
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
+    });
+    const startPointer = pointer(event);
+    const center = { x: origin.box.x + origin.box.w / 2, y: origin.box.y + origin.box.h / 2 };
+    const grab = { x: center.x - startPointer.x, y: center.y - startPointer.y };
+    const grabDistance = Math.max(0.02, Math.hypot(startPointer.x - center.x, startPointer.y - center.y));
+
+    const ensureTarget = () => {
+      if (target) return;
+      const keys = clip.keys || [];
+      if (keys.length >= MAX_KEYFRAMES) {
+        // déjà au maximum : on règle la plus proche plutôt que d'en perdre une
+        target = keys.reduce((best, key) => (!best || Math.abs(key.t - local) < Math.abs(best.t - local) ? key : best), null) || clip;
+        return;
+      }
+      target = { t: Number(local.toFixed(3)), box: { ...origin.box }, rotation: origin.rotation, opacity: origin.opacity };
+      clip.keys = [...keys, target].sort((a, b) => a.t - b.t);
+    };
+
+    const write = (patch) => {
+      const writeTo = (holder) => {
+        if (patch.box) holder.box = patch.box;
+        if (patch.rotation !== undefined) holder.rotation = patch.rotation;
+        if (patch.opacity !== undefined) holder.opacity = patch.opacity;
+      };
+      writeTo(target === clip ? clip : target);
+      stage.update(S.playhead);
+      emit("overlay-touched", { clipId: clip.id });
+    };
+
+    const snap = (value) => {
+      for (const guide of [0.5, 1 / 3, 2 / 3]) if (Math.abs(value - guide) < 0.012) return guide;
+      return value;
+    };
+
+    entry.node.classList.add("dragging");
+    const move = (e) => {
+      moved = true;
+      ensureTarget();
+      const point = pointer(e);
+      if (mode === "move") {
+        let cx = point.x + grab.x;
+        let cy = point.y + grab.y;
+        if (!e.altKey) {
+          cx = snap(cx);
+          cy = snap(cy);
+        }
+        cx = clamp(cx, -0.25, 1.25);
+        cy = clamp(cy, -0.25, 1.25);
+        write({ box: { x: cx - origin.box.w / 2, y: cy - origin.box.h / 2, w: origin.box.w, h: origin.box.h } });
+      } else if (mode === "resize") {
+        const distance = Math.hypot(point.x - center.x, point.y - center.y);
+        const factor = clamp(distance / grabDistance, 0.12, 5);
+        const w = clamp(origin.box.w * factor, 0.02, 2);
+        const h = clamp(origin.box.h * factor, 0.02, 2);
+        write({ box: { x: center.x - w / 2, y: center.y - h / 2, w, h } });
+      } else {
+        const angle = (Math.atan2(point.y - center.y, point.x - center.x) * 180) / Math.PI + 90;
+        write({ rotation: clamp(e.altKey ? angle : Math.round(angle / 15) * 15, -180, 180) });
+      }
+    };
+    const up = () => {
+      entry.node.classList.remove("dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (!moved) return;
+      emit("persist");
+      emit("render");
+      emit("overlay-touched", { clipId: clip.id, done: true });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  entry.node.addEventListener("pointerdown", (event) => {
+    const mode = event.target === entry.handles?.resize
+      ? "resize"
+      : event.target === entry.handles?.rotate
+        ? "rotate"
+        : "move";
+    begin(event, mode);
+  });
+  entry.node.addEventListener("dblclick", (event) => {
+    event.stopPropagation();
+    emit("edit-overlay", { clipId: entry.clip.id });
+  });
 }
 
 /** Déplacement d'un texte à la souris, directement sur l'aperçu. */

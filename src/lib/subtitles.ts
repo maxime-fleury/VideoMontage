@@ -113,6 +113,36 @@ function assEscape(text: string) {
 }
 
 /** Regroupe les mots en lignes de sous-titres. */
+/** Horodatage SRT/VTT : 00:01:23,456 (la virgule devient un point en VTT). */
+function stamp(seconds: number, separator: "," | ".") {
+  const total = Math.max(0, seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total - hours * 3600) / 60);
+  const secs = Math.floor(total - hours * 3600 - minutes * 60);
+  const millis = Math.round((total - Math.floor(total)) * 1000);
+  const pad = (value: number, size: number) => String(value).padStart(size, "0");
+  return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(secs, 2)}${separator}${pad(Math.min(999, millis), 3)}`;
+}
+
+/**
+ * Conversion d'un ensemble de lignes (celles affichées à l'écran) en SRT ou VTT,
+ * pour un dépôt sur YouTube par exemple : mêmes coupures que les sous-titres
+ * incrustés, donc aucun écart entre ce qu'on lit et ce qu'on téléverse.
+ */
+export function toSubtitleFile(lines: { start: number; end: number; words: { w: string }[] }[], format: "srt" | "vtt") {
+  const text = (line: { words: { w: string }[] }) => line.words.map((word) => word.w).join(" ").trim();
+  if (format === "vtt") {
+    const blocks = lines
+      .filter((line) => text(line))
+      .map((line) => `${stamp(line.start, ".")} --> ${stamp(line.end, ".")}\n${text(line)}`);
+    return `WEBVTT\n\n${blocks.join("\n\n")}\n`;
+  }
+  const blocks = lines
+    .filter((line) => text(line))
+    .map((line, index) => `${index + 1}\n${stamp(line.start, ",")} --> ${stamp(line.end, ",")}\n${text(line)}`);
+  return `${blocks.join("\n\n")}\n`;
+}
+
 export function subtitleLines(project: Project, maxWords: number) {
   const transcript = project.transcript;
   if (!transcript) return [];

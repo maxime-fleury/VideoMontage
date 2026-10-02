@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { DATA_DIR, MODELS_DIR, PROJECTS_DIR, TOOLS_DIR, mediaDir, newId, projectDir, writeJson, readJson, buildDir } from "./util";
+import { DATA_DIR, MODELS_DIR, PROJECTS_DIR, TOOLS_DIR, clamp, mediaDir, newId, projectDir, writeJson, readJson, buildDir } from "./util";
 import { defaultSubtitles } from "./subtitles";
 
 export type SourceKind = "audio" | "video" | "image";
@@ -16,8 +16,40 @@ export type Source = {
   height?: number;
   fps?: number;
   origin: "record" | "upload" | "search" | "url";
+  /** clé chromatique (fond vert/bleu) : s'applique au média partout où il est incrusté */
+  chroma?: Chroma;
   meta?: Record<string, unknown>;
   createdAt: number;
+};
+
+/**
+ * Clé chromatique : rend transparente une couleur de fond (vert, bleu…).
+ * `similarity` = largeur de la plage de couleurs écartée, `blend` = douceur du
+ * bord, `despill` = retrait du reflet coloré qui reste sur les contours.
+ */
+export type Chroma = {
+  enabled: boolean;
+  /** couleur écran, en hexadécimal #rrggbb */
+  color: string;
+  similarity: number; // 0..1
+  blend: number; // 0..1
+  despill: boolean;
+};
+
+export function defaultChroma(over: Partial<Chroma> = {}): Chroma {
+  return { enabled: false, color: "#00ff00", similarity: 0.3, blend: 0.1, despill: true, ...over };
+}
+
+/**
+ * Image clé d'une incrustation : un état complet à un instant local du clip.
+ * Deux images clés suffisent à décrire « ce mouvement-là », et on peut en poser
+ * davantage pour un trajet en zigzag.
+ */
+export type Keyframe = {
+  t: number; // secondes depuis le début de l'incrustation
+  box: Box;
+  rotation: number;
+  opacity: number;
 };
 
 export type Range = { start: number; end: number };
@@ -213,6 +245,13 @@ export type OverlayClip = {
   motion: Motion;
   fadeIn: number;
   fadeOut: number;
+  /**
+   * Images clés (facultatif) : quand il y en a, elles remplacent le mouvement
+   * prédéfini et décrivent position, taille, rotation et opacité à chaque instant.
+   */
+  keys?: Keyframe[];
+  /** courbe d'interpolation entre deux images clés */
+  ease?: "linear" | "smooth";
   /** bande son de la vidéo incrustée (coupée par défaut) */
   audio: { mute: boolean; gain: number };
   createdAt: number;
@@ -453,6 +492,9 @@ export async function getProject(pid: string): Promise<Project | null> {
   const p = cleanDeep(await readJson<Project>(projectPath(pid)));
   if (!p) return null;
   // Compatibilité / défauts
+  p.sources = (p.sources || []).map((source) =>
+    source.chroma ? { ...source, chroma: defaultChroma(source.chroma) } : source
+  );
   p.voice = p.voice || { edits: defaultEdits() };
   p.voice.edits = { ...defaultEdits(), ...p.voice.edits, denoise: { ...defaultEdits().denoise, ...p.voice.edits?.denoise } };
   p.videoTrack = (p.videoTrack || []).map((clip) => ({
@@ -477,6 +519,17 @@ export async function getProject(pid: string): Promise<Project | null> {
       motion: { ...defaultMotion(), ...(clip.motion || {}) },
       fadeIn: Number(clip.fadeIn) || 0,
       fadeOut: Number(clip.fadeOut) || 0,
+      keys: Array.isArray(clip.keys) && clip.keys.length
+        ? clip.keys
+            .map((key) => ({
+              t: clamp(Number(key?.t) || 0, 0, 3600),
+              box: { ...defaultBox(), ...(key?.box || {}) },
+              rotation: Number(key?.rotation) || 0,
+              opacity: clamp(Number(key?.opacity ?? 1), 0, 1),
+            }))
+            .sort((a, b) => a.t - b.t)
+        : undefined,
+      ease: clip.ease === "smooth" ? "smooth" : "linear",
       audio: { mute: clip.audio?.mute !== false, gain: Number(clip.audio?.gain) || 1 },
       createdAt: clip.createdAt || Date.now(),
     })),

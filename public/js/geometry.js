@@ -1,5 +1,6 @@
 import { clamp } from "./api.js";
 import { evalExpr, fillTemplate } from "./expr.js";
+import { hasKeyframes, keyframeExprs } from "./keyframes.js";
 
 /**
  * Géométrie d'une incrustation à un instant local donné.
@@ -11,6 +12,24 @@ import { evalExpr, fillTemplate } from "./expr.js";
  * Module sans DOM : testé directement par tests/front.test.ts.
  */
 export function overlayGeometry(clip, local, motions) {
+  // Images clés : les expressions sont écrites côté serveur (module partagé
+  // keyframes.js) et évaluées ici avec le même temps local que ffmpeg.
+  if (hasKeyframes(clip)) {
+    const kf = keyframeExprs(clip, clip.duration);
+    const t = Math.max(0, local);
+    const at = (expression, fallback) => {
+      try {
+        return evalExpr(expression, { t });
+      } catch {
+        return fallback;
+      }
+    };
+    const cx = at(kf.cx, clip.box.x + clip.box.w / 2);
+    const cy = at(kf.cy, clip.box.y + clip.box.h / 2);
+    const w = Math.max(0.001, at(kf.wf, clip.box.w));
+    const h = Math.max(0.001, at(kf.hf, clip.box.h));
+    return { x: cx - w / 2, y: cy - h / 2, w, h, scale: 1, rotation: at(kf.rot, 0), keyframed: true };
+  }
   const templates = motions?.templates?.[clip.motion?.preset] || { dx: "0", dy: "0", scale: "1" };
   const duration = Math.max(0.05, clip.duration);
   const values = {
@@ -38,13 +57,23 @@ export function overlayGeometry(clip, local, motions) {
     w,
     h,
     scale,
+    rotation: Number(clip.rotation) || 0,
+    keyframed: false,
   };
 }
 
 /** Fondu d'entrée/sortie d'une incrustation à un instant local. */
 export function overlayAlpha(clip, local) {
   const duration = Math.max(0.05, clip.duration);
-  const base = clamp(clip.opacity ?? 1, 0, 1);
+  let base = clamp(clip.opacity ?? 1, 0, 1);
+  if (hasKeyframes(clip)) {
+    const kf = keyframeExprs(clip, duration);
+    try {
+      base = clamp(evalExpr(kf.op, { t: Math.max(0, local) }), 0, 1);
+    } catch {
+      // une expression illisible ne doit pas casser l'aperçu
+    }
+  }
   const fadeIn = Math.max(0, Math.min(clip.fadeIn || 0, duration / 2));
   const fadeOut = Math.max(0, Math.min(clip.fadeOut || 0, duration / 2));
   let alpha = base;

@@ -977,6 +977,35 @@ a { color: var(--violet-3); }
   will-change: transform, opacity;
 }
 .stage-overlay > img, .stage-overlay > video { width: 100%; height: 100%; display: block; }
+.stage-overlay { cursor: move; }
+.stage-overlay.selected { outline: 1px dashed rgba(34, 211, 238, 0.9); outline-offset: 4px; }
+.stage-overlay.dragging { cursor: grabbing; }
+/* Aperçu de la transparence : damier visible derrière un média détouré. */
+.stage-overlay.chroma {
+  background-color: #14101f;
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.1) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.1) 75%),
+    linear-gradient(45deg, rgba(255, 255, 255, 0.1) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.1) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+/* Le média d'origine reste chargé et décodé (il alimente le canvas) mais invisible. */
+.stage-overlay.chroma > img, .stage-overlay.chroma > video { opacity: 0; position: absolute; inset: 0; }
+.stage-overlay > canvas.chroma-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.stage-overlay .overlay-handle {
+  position: absolute;
+  opacity: 0;
+  transition: opacity 0.15s;
+  background: linear-gradient(135deg, var(--cyan), var(--violet-1));
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 4px 12px rgba(5, 2, 14, 0.6);
+}
+.stage-overlay:hover .overlay-handle, .stage-overlay.selected .overlay-handle { opacity: 1; }
+.stage-overlay .overlay-handle.corner { right: -8px; bottom: -8px; width: 14px; height: 14px; border-radius: 4px; cursor: nwse-resize; }
+.stage-overlay .overlay-handle.rotate { left: 50%; top: -22px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; cursor: grab; }
+/* Pipette de la clé chromatique. */
+#stage.picking { cursor: crosshair; }
+#stage.picking .stage-overlay { pointer-events: none; }
 .stage-text {
   position: absolute;
   cursor: move;
@@ -1050,3 +1079,18 @@ a { color: var(--violet-3); }
 .auto-log { font-size: 11px; color: var(--muted); border-left: 2px solid rgba(167, 139, 250, 0.4); padding-left: 7px; }
 .notice.error { background: rgba(251, 113, 133, 0.12); border-color: rgba(251, 113, 133, 0.4); color: #ffd3da; }
 
+/* ---------------- images clés des incrustations ---------------- */
+.kf-list { display: flex; flex-direction: column; gap: 3px; margin: 4px 0 2px; }
+.kf-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+}
+.kf-row.current { border-color: rgba(34, 211, 238, 0.6); background: rgba(34, 211, 238, 0.12); }
+.kf-row .kf-label { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; }
+.kf-row button.ghost.small { padding: 2px 7px; font-size: 12px; }

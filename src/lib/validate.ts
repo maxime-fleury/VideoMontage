@@ -1,6 +1,6 @@
 import { clamp, newId, sanitizeText } from "./util";
 import { MOTIONS } from "./motions";
-import type { MotionPresetId, OverlayClip, OverlayLayer, TextOverlay } from "./store";
+import { defaultChroma, type Chroma, type Keyframe, type MotionPresetId, type OverlayClip, type OverlayLayer, type TextOverlay } from "./store";
 
 /**
  * Nombre maximal de pistes de superposition. Appliqué ici (donc pour toute
@@ -9,6 +9,46 @@ import type { MotionPresetId, OverlayClip, OverlayLayer, TextOverlay } from "./s
  * Le front garde la même valeur dans public/js/tracks.js.
  */
 export const MAX_OVERLAY_LAYERS = 3;
+
+// Le plafond d'images clés vit dans le module partagé avec l'aperçu : le
+// navigateur et le serveur comptent les images clés de la même façon.
+import { MAX_KEYFRAMES } from "../../public/js/keyframes.js";
+export { MAX_KEYFRAMES };
+
+/** Valide une clé chromatique reçue du navigateur. */
+export function normalizeChroma(raw: any): Chroma {
+  const base = defaultChroma();
+  if (!raw || typeof raw !== "object") return { ...base, enabled: false };
+  return {
+    enabled: !!raw.enabled,
+    color: typeof raw.color === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.color) ? raw.color.toLowerCase() : base.color,
+    similarity: clamp(Number(raw.similarity ?? base.similarity), 0, 1),
+    blend: clamp(Number(raw.blend ?? base.blend), 0, 1),
+    despill: raw.despill !== false,
+  };
+}
+
+/**
+ * Valide les images clés d'une incrustation : triées, bornées, au plus
+ * MAX_KEYFRAMES. Renvoie `undefined` s'il n'y en a pas (mouvement prédéfini).
+ */
+export function normalizeKeyframes(raw: any): Keyframe[] | undefined {
+  if (!Array.isArray(raw) || !raw.length) return undefined;
+  return raw
+    .slice(0, MAX_KEYFRAMES)
+    .map((key) => ({
+      t: clamp(Number(key?.t) || 0, 0, 3600),
+      box: {
+        x: clamp(Number(key?.box?.x) || 0, -1, 2),
+        y: clamp(Number(key?.box?.y) || 0, -1, 2),
+        w: clamp(Number(key?.box?.w) || 0.34, 0.02, 2),
+        h: clamp(Number(key?.box?.h) || 0.34, 0.02, 2),
+      },
+      rotation: clamp(Number(key?.rotation) || 0, -180, 180),
+      opacity: clamp(Number(key?.opacity ?? 1), 0, 1),
+    }))
+    .sort((a, b) => a.t - b.t);
+}
 
 const MOTION_IDS = new Set<string>(MOTIONS.map((m) => m.id));
 
@@ -41,6 +81,8 @@ export function normalizeOverlayClip(raw: any): OverlayClip {
     },
     fadeIn: clamp(Number(raw?.fadeIn) || 0, 0, 10),
     fadeOut: clamp(Number(raw?.fadeOut) || 0, 0, 10),
+    keys: normalizeKeyframes(raw?.keys),
+    ease: raw?.ease === "smooth" ? "smooth" : "linear",
     audio: { mute: raw?.audio?.mute !== false, gain: clamp(Number(raw?.audio?.gain ?? 1), 0, 4) },
     createdAt: Number(raw?.createdAt) || Date.now(),
   };

@@ -1,8 +1,9 @@
 import { badRequest, clamp, json, slug } from "../lib/util";
 import { deleteSourceFile, saveProject, type AudioTrack } from "../lib/store";
-import { renderMontage } from "../lib/ffmpeg";
+import { clearClipCache, renderMontage } from "../lib/ffmpeg";
 import { createJob, failJob, finishJob, isCancelled, runHeavyJob, updateJob } from "../lib/jobs";
-import { defaultSubtitles, subtitleLines, SUBTITLE_PRESETS } from "../lib/subtitles";
+import { defaultSubtitles, subtitleLines, toSubtitleFile, SUBTITLE_PRESETS } from "../lib/subtitles";
+import { normalizeChroma } from "../lib/validate";
 import { readBody } from "../lib/http";
 import { cleanupPartialOutput, serialize } from "../lib/projectview";
 import type { ProjectRouteCtx } from "./types";
@@ -11,6 +12,37 @@ import type { ProjectRouteCtx } from "./types";
 export async function handleMontage(ctx: ProjectRouteCtx): Promise<Response | null> {
   const { req, parts, method, project, pid } = ctx;
   const [, , , c, d] = parts;
+
+  // --- sous-titres téléchargeables (SRT / VTT) ---------------------------
+  const subtitleFile = /^subtitles\.(srt|vtt)$/.exec(c || "");
+  if (subtitleFile && method === "GET") {
+    const style = { ...defaultSubtitles(), ...(project.subtitles || {}) };
+    const lines = project.transcript ? subtitleLines(project, style.maxWordsPerLine) : [];
+    const format = subtitleFile[1] as "srt" | "vtt";
+    return new Response(toSubtitleFile(lines, format), {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "content-disposition": `attachment; filename="${slug(project.name || "montage")}.${format}"`,
+      },
+    });
+  }
+
+  // --- cache des clips pré-rendus ----------------------------------------
+  if (c === "cache" && d === "clear" && method === "POST") {
+    const freed = await clearClipCache(pid);
+    return json({ cache: freed });
+  }
+
+  // --- clé chromatique d'un média ----------------------------------------
+  if (c === "sources" && d === "chroma" && method === "POST") {
+    const body = await readBody<{ sourceId?: string; chroma?: unknown }>(req);
+    const source = project.sources.find((s) => s.id === body.sourceId);
+    if (!source) return badRequest("Source introuvable");
+    const chroma = normalizeChroma(body.chroma);
+    source.chroma = chroma.enabled ? chroma : undefined;
+    await saveProject(project);
+    return json({ project: serialize(project), source, chroma });
+  }
 
   // --- sous-titres --------------------------------------------------------
   if (c === "subtitles" && method === "GET") {

@@ -72,6 +72,14 @@ export function fmtTime(t) {
   return `${m}:${s.toFixed(1).padStart(4, "0")}`;
 }
 
+export function fmtBytes(bytes) {
+  const n = Math.max(0, Number(bytes) || 0);
+  if (n < 1024) return `${n} o`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} Ko`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} Mo`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} Go`;
+}
+
 export function fmtDuration(t) {
   const m = Math.floor(t / 60);
   const s = Math.round(t % 60);

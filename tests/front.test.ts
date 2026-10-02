@@ -3,6 +3,8 @@ import { motionCatalog } from "../src/lib/motions";
 // les modules testés sont ceux servis au navigateur (public/js), pas des copies
 import { evalExpr, fillTemplate } from "../public/js/expr";
 import { overlayAlpha, overlayGeometry } from "../public/js/geometry";
+import { keyframeExprs, keysFromClip } from "../public/js/keyframes";
+import { applyChroma, contentRect, despill, hexToRgb, keyAlpha } from "../public/js/chroma";
 import { DEFAULT_W, MIN_COL, columnLayout, columnWidth } from "../public/js/layoutmath";
 import { reconcile } from "../public/js/state";
 
@@ -67,6 +69,150 @@ describe("géométrie de l'aperçu", () => {
     // les fondus ne peuvent pas dépasser la moitié du clip
     const silly = clip({ fadeIn: 40, fadeOut: 40 });
     expect(overlayAlpha(silly, 2)).toBe(1);
+  });
+});
+
+describe("images clés des incrustations", () => {
+  const start = { x: 0.1, y: 0.1, w: 0.3, h: 0.2 };
+  const end = { x: 0.5, y: 0.3, w: 0.6, h: 0.4 };
+  const animated = (over: any = {}) => ({
+    ...clip(),
+    duration: 4,
+    box: { ...start },
+    rotation: 0,
+    opacity: 1,
+    ease: "smooth",
+    keys: [
+      { t: 0, box: { ...start }, rotation: 0, opacity: 1 },
+      { t: 4, box: { ...end }, rotation: 90, opacity: 0.5 },
+    ],
+    ...over,
+  });
+
+  test("deux états interpolés : position, taille, rotation et opacité", () => {
+    const moving = animated();
+    const atStart = overlayGeometry(moving, 0, CATALOG);
+    const middle = overlayGeometry(moving, 2, CATALOG);
+    const atEnd = overlayGeometry(moving, 4, CATALOG);
+
+    expect(atStart.x).toBeCloseTo(start.x, 9);
+    expect(atEnd.x).toBeCloseTo(end.x, 9);
+    expect(middle.x).toBeCloseTo((start.x + end.x) / 2, 9);
+    // la taille grandit dans le temps et la rotation suit la même courbe
+    expect(middle.w).toBeCloseTo((start.w + end.w) / 2, 9);
+    expect(middle.rotation).toBeCloseTo(45, 9);
+    expect(atStart.keyframed).toBe(true);
+    // opacité : 1 → 0.5, à mi-parcours la courbe douce donne exactement 0.75
+    expect(overlayAlpha(moving, 0)).toBeCloseTo(1, 9);
+    expect(overlayAlpha(moving, 2)).toBeCloseTo(0.75, 9);
+    expect(overlayAlpha(moving, 4)).toBeCloseTo(0.5, 9);
+  });
+
+  test("avant la première et après la dernière image clé, l'état est tenu", () => {
+    const moving = animated({ keys: [
+      { t: 1, box: { ...start }, rotation: 10, opacity: 0.8 },
+      { t: 3, box: { ...end }, rotation: 40, opacity: 0.4 },
+    ] });
+    const before = overlayGeometry(moving, 0, CATALOG);
+    const first = overlayGeometry(moving, 1, CATALOG);
+    expect(before.x).toBeCloseTo(first.x, 9);
+    expect(before.rotation).toBeCloseTo(10, 9);
+    expect(overlayAlpha(moving, 0)).toBeCloseTo(0.8, 9);
+    const after = overlayGeometry(moving, 4, CATALOG);
+    expect(after.rotation).toBeCloseTo(40, 9);
+    expect(overlayAlpha(moving, 4.5)).toBeCloseTo(0.4, 9);
+  });
+
+  test("les expressions d'images clés restent évaluables et sans opérateur < >", () => {
+    // garde-fou : les opérateurs `<` et `>` cassent le parseur d'expressions de
+    // ffmpeg (vérifié sur 8.1) ; les expressions doivent utiliser lt()/gt()
+    const kf = keyframeExprs(animated(), 4);
+    for (const expression of [kf.cx, kf.cy, kf.wf, kf.hf, kf.rot, kf.op]) {
+      expect(/[<>]/.test(expression)).toBe(false);
+      for (const t of [0, 1.5, 2, 3.25, 4, 10]) {
+        expect(Number.isFinite(evalExpr(expression, { t }))).toBe(true);
+      }
+    }
+    // le temps passe bien par la variable demandée (geq utilise N/fps côté ffmpeg)
+    const frames = keyframeExprs(animated(), 4, "(N/25.000)").op;
+    expect(frames).toContain("N/25.000");
+    expect(evalExpr(frames, { N: 0 })).toBeCloseTo(1, 9);
+  });
+
+  test("keysFromClip part de l'état actuel et couvre toute la durée", () => {
+    const keys = keysFromClip({ ...clip(), duration: 2.5, box: { ...BOX }, rotation: 12, opacity: 0.7 });
+    expect(keys).toHaveLength(2);
+    expect(keys[0].t).toBe(0);
+    expect(keys[1].t).toBeCloseTo(2.5, 6);
+    expect(keys[0].box).toEqual({ ...BOX });
+    expect(keys[1].rotation).toBe(12);
+    expect(keys[1].opacity).toBeCloseTo(0.7, 6);
+  });
+});
+
+describe("clé chromatique (mêmes formules que ffmpeg)", () => {
+  const GREEN = hexToRgb("#00ff00");
+
+  test("colorkey : distance normalisée et rampe de mélange", () => {
+    // pixel exactement sur la couleur-clé → transparent
+    expect(keyAlpha(0, 255, 0, GREEN, 0.3, 0.1)).toBe(0);
+    // pixel très éloigné (blanc) → opaque
+    expect(keyAlpha(255, 255, 255, GREEN, 0.3, 0.1)).toBe(1);
+    // rampe : sur le canal de l'écran, la distance vaut exactement l'écart normalisé
+    // (200 - 255) / (255√3) = 0.1245 < 0.3 → encore transparent
+    expect(keyAlpha(0, 200, 0, GREEN, 0.3, 0.1)).toBe(0);
+    // (100 - 255) / (255√3) = 0.3509 → dans la rampe : alpha ≈ (0.3509 - 0.3) / 0.1
+    const ramped = keyAlpha(0, 100, 0, GREEN, 0.3, 0.1);
+    expect(ramped).toBeGreaterThan(0.4);
+    expect(ramped).toBeLessThan(0.6);
+    // mélange nul → seuil net (comportement de ffmpeg avec blend=0)
+    expect(keyAlpha(0, 100, 0, GREEN, 0.3, 0)).toBe(1);
+    expect(keyAlpha(0, 200, 0, GREEN, 0.3, 0)).toBe(0);
+  });
+
+  test("despill : le canal de l'écran est réduit, pas les autres", () => {
+    const spilled = despill(120, 210, 100, GREEN);
+    expect(spilled.g).toBeLessThan(210);
+    expect(spilled.r).toBeCloseTo(120, 6);
+    expect(spilled.b).toBeCloseTo(100, 6);
+    // un pixel sans reflet n'est pas touché
+    const clean = despill(120, 90, 100, GREEN);
+    expect(clean.g).toBeCloseTo(90, 6);
+    // écran bleu : c'est le bleu qui est réduit
+    const blue = despill(120, 90, 230, hexToRgb("#0000ff"));
+    expect(blue.b).toBeLessThan(230);
+    expect(blue.g).toBeCloseTo(90, 6);
+  });
+
+  test("applyChroma modifie l'alpha et nettoie la couleur des pixels détourés", () => {
+    const data = new Uint8ClampedArray([
+      0, 255, 0, 255, // écran vert → transparent
+      255, 255, 255, 255, // sujet clair → opaque
+      0, 100, 0, 255, // dans la rampe → alpha partiel
+    ]);
+    applyChroma({ data }, { enabled: true, color: "#00ff00", similarity: 0.3, blend: 0.25, despill: false });
+    expect(data[3]).toBe(0);
+    expect(data[7]).toBe(255);
+    expect(data[11]).toBeGreaterThan(0);
+    expect(data[11]).toBeLessThan(255);
+    // sous un alpha nul, la couleur est neutralisée (pas de halo de couleur)
+    expect(data[0] + data[1] + data[2]).toBe(0);
+    // désactivée, le média reste intact
+    const intact = new Uint8ClampedArray([0, 255, 0, 255]);
+    applyChroma({ data: intact }, { enabled: false, color: "#00ff00", similarity: 0.3, blend: 0.1, despill: true });
+    expect([...intact]).toEqual([0, 255, 0, 255]);
+  });
+
+  test("contentRect reproduit object-fit (pipette précise)", () => {
+    // média 4:3 dans une boîte 16:9 : « cover » recadre en hauteur, « contain » laisse des marges
+    const cover = contentRect(160, 120, 320, 180, "cover");
+    expect(cover.width).toBeCloseTo(320, 6);
+    expect(cover.height).toBeCloseTo(240, 6);
+    expect(cover.top).toBeCloseTo(-30, 6);
+    const contain = contentRect(160, 120, 320, 180, "contain");
+    expect(contain.width).toBeCloseTo(240, 6);
+    expect(contain.height).toBeCloseTo(180, 6);
+    expect(contain.left).toBeCloseTo(40, 6);
   });
 });
 

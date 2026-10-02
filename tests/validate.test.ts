@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_KEYFRAMES,
   MAX_OVERLAY_LAYERS,
+  normalizeChroma,
   normalizeOverlayClip,
   normalizeOverlayLayer,
   normalizeOverlayLayers,
@@ -59,5 +61,44 @@ describe("validation des incrustations et des textes", () => {
     expect(text.animation.out).toBe("fade");
     expect(text.animation.duration).toBe(0.35);
     expect(text.style.font).toBe("Outfit");
+  });
+
+  test("les images clés sont triées, bornées et limitées", () => {
+    const clip = normalizeOverlayClip({
+      keys: [
+        { t: 3, box: { x: 0, y: 0, w: 0.3, h: 0.2 }, rotation: 400, opacity: 5 },
+        { t: -1, box: { x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, rotation: 12, opacity: -2 },
+      ],
+      ease: "smooth",
+    });
+    expect(clip.keys).toHaveLength(2);
+    expect(clip.keys![0].t).toBe(0);
+    expect(clip.keys![1].t).toBe(3);
+    expect(clip.keys![1].rotation).toBe(180);
+    expect(clip.keys![1].opacity).toBe(1);
+    expect(clip.keys![0].opacity).toBe(0);
+    expect(clip.ease).toBe("smooth");
+
+    // au-delà du plafond, on garde les premières : le rendu ne s'alourdit pas
+    const many = normalizeOverlayClip({ keys: Array.from({ length: 30 }, (_, i) => ({ t: i })) });
+    expect(many.keys).toHaveLength(MAX_KEYFRAMES);
+
+    // aucune image clé → mouvement prédéfini, comme avant
+    expect(normalizeOverlayClip({ keys: [] }).keys).toBeUndefined();
+    expect(normalizeOverlayClip({}).ease).toBe("linear");
+  });
+
+  test("une clé chromatique est bornée et retombe sur le vert", () => {
+    const chroma = normalizeChroma({ enabled: true, color: "rouge", similarity: 4, blend: -2, despill: false });
+    expect(chroma.enabled).toBe(true);
+    expect(chroma.color).toBe("#00ff00");
+    expect(chroma.similarity).toBe(1);
+    expect(chroma.blend).toBe(0);
+    expect(chroma.despill).toBe(false);
+
+    const off = normalizeChroma(null);
+    expect(off.enabled).toBe(false);
+    expect(off.despill).toBe(true);
+    expect(off.similarity).toBeCloseTo(0.3, 6);
   });
 });

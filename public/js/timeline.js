@@ -187,18 +187,64 @@ function startDrag(e, clip, mode, kind, extra = {}) {
   window.addEventListener("mouseup", onDragEnd);
 }
 
+/**
+ * Toutes les frontières de clips du montage (débuts et fins, vidéo, calques,
+ * textes et audio) : ce sont les aimants du glisser. On écarte le clip en cours
+ * de déplacement, sinon il s'aimante à sa propre position.
+ */
+function clipBoundaries(exceptId) {
+  const times = [0];
+  const add = (id, start, dur) => {
+    if (id === exceptId) return;
+    if (!Number.isFinite(start) || !Number.isFinite(dur)) return;
+    times.push(start, start + dur);
+  };
+  for (const clip of S.project?.videoTrack || []) add(clip.id, clip.start, clip.duration);
+  for (const layer of S.project?.overlayLayers || []) for (const clip of layer.clips || []) add(clip.id, clip.start, clip.duration);
+  for (const text of S.project?.texts || []) add(text.id, text.start, text.duration);
+  for (const track of S.project?.audioTracks || []) for (const clip of track.clips || []) add(clip.id, clip.start, clip.duration);
+  times.push(duration());
+  return times;
+}
+
+/** Ramène `value` sur la frontière la plus proche, à moins de `tolerance`. */
+function snapTo(value, times, tolerance) {
+  let best = value;
+  let bestDistance = tolerance;
+  for (const time of times) {
+    const distance = Math.abs(value - time);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = time;
+    }
+  }
+  return best;
+}
+
 function onDragMove(e) {
   if (!dragState) return;
   const { clip, mode, orig } = dragState;
   const delta = (e.clientX - dragState.startX) / S.pxPerSec;
   const limit = dragState.limit ?? duration();
+  // Aimantation aux frontières de clips (± 7 px). Alt enfonce l'aimant.
+  const magnets = e.altKey ? null : clipBoundaries(clip.id);
+  const tolerance = 7 / Math.max(1, S.pxPerSec);
   if (mode === "move") {
-    clip.start = Math.max(0, Math.min(Math.max(0.1, limit - 0.2), orig.start + delta));
+    let start = orig.start + delta;
+    if (magnets) {
+      // le début **ou** la fin du clip se colle à la frontière la plus proche
+      const byStart = snapTo(start, magnets, tolerance);
+      const byEnd = snapTo(orig.start + orig.duration, magnets, tolerance) - orig.duration;
+      start = Math.abs(byStart - start) <= Math.abs(byEnd - start) ? byStart : byEnd;
+    }
+    clip.start = Math.max(0, Math.min(Math.max(0.1, limit - 0.2), start));
   } else if (mode === "trim-left") {
     // Un texte n'a pas de décalage dans une source : on ne rogne que sa durée.
     const canOffset = dragState.kind !== "text";
+    let next = orig.start + delta;
+    if (magnets) next = snapTo(next, magnets, tolerance);
     const newStart = clamp(
-      orig.start + delta,
+      next,
       canOffset ? Math.max(0, orig.start - orig.offset) : 0,
       orig.start + orig.duration - 0.2
     );
@@ -206,7 +252,9 @@ function onDragMove(e) {
     clip.duration = orig.duration - (newStart - orig.start);
     if (canOffset) clip.offset = Math.max(0, orig.offset + (newStart - orig.start));
   } else {
-    clip.duration = Math.max(0.2, Math.min(orig.duration + delta, limit - clip.start, 3600));
+    let end = orig.start + orig.duration + delta;
+    if (magnets) end = snapTo(end, magnets, tolerance);
+    clip.duration = Math.max(0.2, Math.min(end - clip.start, limit - clip.start, 3600));
   }
   emit("dragging");
   renderTimeline();

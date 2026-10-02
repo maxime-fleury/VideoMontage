@@ -1,5 +1,5 @@
 import { S, emit, on, duration, clips, sourceById, allAudioClips, adoptProject } from "./state.js";
-import { $, el, api, toast, clamp, fmtTime, fmtDuration, watchJob } from "./api.js";
+import { $, el, api, toast, clamp, fmtBytes, fmtTime, fmtDuration, watchJob } from "./api.js";
 import { openImageEditor, openIllustrationPicker } from "./illustrations.js";
 
 export function initPanels() {
@@ -566,6 +566,7 @@ export function renderSetupInto(box) {
   );
   box.append(el("div", { class: "kv" }, [el("span", { text: "RNNoise" }), el("b", { text: whisper.rnnoise || "non installé" })]));
   box.append(el("div", { class: "muted", style: { fontSize: "11px", marginTop: "6px" }, text: "FFmpeg détecté ✓" }));
+  renderCacheTool(box);
 
   const actions = el("div", { class: "panel-actions" });
   if (!whisper.binary || !installed.length) {
@@ -581,6 +582,46 @@ export function renderSetupInto(box) {
     actions.append(el("button", { text: "⬇️ Modèle RNNoise", onclick: () => installRnnoise() }));
   }
   if (actions.children.length) box.append(actions);
+}
+
+/**
+ * Outil « vider le cache » : les clips pré-rendus (recadrage, zoom, transitions)
+ * accélèrent l'export. Ils pèsent parfois plusieurs centaines de Mo et deviennent
+ * inutiles si l'on veut forcer leur recalcul.
+ */
+function renderCacheTool(box) {
+  if (!S.project) return;
+  box.append(el("div", { class: "divider" }));
+  box.append(el("div", { class: "panel-title", text: "🧰 Outils" }));
+  box.append(
+    el("div", {
+      class: "muted",
+      style: { fontSize: "11px", marginBottom: "6px" },
+      text: "Les clips pré-rendus accélèrent l'aperçu et l'export. Les vider libère de la place et force leur recalcul.",
+    })
+  );
+  const button = el("button", {
+    text: "🧹 Vider le cache des clips",
+    title: "Supprime les clips intermédiaires du projet (les exports suivants les recréent)",
+    onclick: async () => {
+      button.disabled = true;
+      try {
+        const { cache } = await api(`/api/projects/${S.project.id}/cache/clear`, { method: "POST" });
+        toast(
+          cache.files
+            ? `Cache vidé : ${cache.files} fichier(s), ${fmtBytes(cache.bytes)} libérés`
+            : "Le cache était déjà vide",
+          "ok",
+          5200
+        );
+      } catch (e) {
+        toast(`Vidage impossible : ${e.message}`, "error");
+      } finally {
+        button.disabled = false;
+      }
+    },
+  });
+  box.append(el("div", { class: "panel-actions" }, [button]));
 }
 
 async function installWhisper(model) {

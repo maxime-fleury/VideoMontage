@@ -2,6 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { FFMPEG, FFPROBE, buildDir, clamp, commandExists, ensureDir, run, runSync } from "./util";
+// Module partagé avec l'aperçu : les expressions d'images clés sont écrites une
+// seule fois, ffmpeg et le navigateur évaluent exactement les mêmes formules.
+import { hasKeyframes, keyframeExprs } from "../../public/js/keyframes.js";
 import type {
   AudioTrack,
   Denoise,
@@ -22,6 +25,15 @@ import { FONTS_DIR } from "./fonts";
 
 export function ffmpegAvailable() {
   return commandExists(FFMPEG);
+}
+
+/** Canaux 0..255 d'une couleur hexadécimale (#rrggbb, #rgb) ; vert par défaut. */
+function hexChannels(hex: string | undefined): [number, number, number] {
+  let value = String(hex || "").trim().replace(/^#/, "");
+  if (value.length === 3) value = value.split("").map((c) => c + c).join("");
+  if (!/^[0-9a-f]{6}$/i.test(value)) return [0, 255, 0];
+  const int = parseInt(value, 16);
+  return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
 }
 
 export type ProbeResult = {
@@ -662,6 +674,24 @@ async function renderClipCache(
   return true;
 }
 
+/**
+ * Vide le cache de clips pré-rendus du projet. Renvoie ce qui a été libéré
+ * (nombre de fichiers + octets), pour l'afficher à l'utilisateur.
+ */
+export async function clearClipCache(projectId: string): Promise<{ files: number; bytes: number }> {
+  const dir = `${buildDir(projectId)}/cache`;
+  const names = await fs.readdir(dir).catch(() => []);
+  let files = 0;
+  let bytes = 0;
+  for (const name of names) {
+    const stat = await fs.stat(`${dir}/${name}`).catch(() => null);
+    if (stat) bytes += stat.size;
+    await fs.rm(`${dir}/${name}`, { force: true, recursive: true }).catch(() => {});
+    files++;
+  }
+  return { files, bytes };
+}
+
 /** Supprime les caches de clips trop anciens (les exports suivants les recréent). */
 async function cleanupClipCache(dir: string) {
   const files = await fs.readdir(dir).catch(() => []);
@@ -674,16 +704,24 @@ async function cleanupClipCache(dir: string) {
 }
 
 /**
- * Chaîne de filtres d'une incrustation (calque vidéo/image) : cadrage dans le
- * rectangle voulu, opacité, fondus, rotation puis mouvement prédéfini.
+ * Chaîne de filtres d'une incrustation (calque vidéo/image) : clé chromatique,
+ * cadrage dans le rectangle voulu, opacité, fondus, rotation, puis mouvement
+ * prédéfini **ou** images clés.
  * Les positions/taille sont des fractions du cadre de sortie, comme dans l'aperçu.
  */
-function overlayChain(clip: OverlayClip, duration: number, out: { width: number; height: number }): {
+function overlayChain(
+  clip: OverlayClip,
+  duration: number,
+  out: { width: number; height: number; fps: number },
+  chroma?: Source["chroma"]
+): {
   chain: string;
   position: string;
 } {
-  const width = Math.max(2, Math.round((clip.box.w * out.width) / 2) * 2);
-  const height = Math.max(2, Math.round((clip.box.h * out.height) / 2) * 2);
+  const keys = hasKeyframes(clip) ? keyframeExprs(clip, duration) : null;
+  const box = keys ? keys.first.box : clip.box;
+  const width = Math.max(2, Math.round((box.w * out.width) / 2) * 2);
+  const height = Math.max(2, Math.round((box.h * out.height) / 2) * 2);
   const parts: string[] = ["setpts=PTS-STARTPTS"];
   parts.push(
     clip.fit === "contain"
@@ -691,13 +729,58 @@ function overlayChain(clip: OverlayClip, duration: number, out: { width: number;
       : `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`
   );
   parts.push("format=rgba");
-  const opacity = Math.max(0, Math.min(1, clip.opacity ?? 1));
-  if (opacity < 0.999) parts.push(`colorchannelmixer=aa=${opacity.toFixed(3)}`);
+
+  // Clé chromatique (fond vert/bleu) : appliquée au média, donc avant tout le reste.
+  if (chroma?.enabled) {
+    const color = (chroma.color || "#00ff00").replace("#", "0x");
+    parts.push(`colorkey=${color}:${clamp(chroma.similarity, 0, 1).toFixed(3)}:${clamp(chroma.blend, 0, 1).toFixed(3)}`);
+    if (chroma.despill !== false) {
+      // Le reflet à retirer dépend de l'écran : vert pour un fond vert, bleu sinon.
+      const [r, g, b] = hexChannels(chroma.color);
+      parts.push(b > g && b > r ? "despill=type=blue" : "despill=type=green");
+    }
+  }
+
+  const opacity = Math.max(0, Math.min(1, keys ? keys.first.opacity : clip.opacity ?? 1));
+  const animateOpacity = !!keys?.varies.op;
+  if (animateOpacity) {
+    // L'opacité varie dans le temps : les filtres par pixel n'ont pas `t`, mais
+    // geq expose `N` (numéro de l'image du clip) → le temps local est N/fps.
+    const time = `(N/${Math.max(1, out.fps).toFixed(3)})`;
+    const alpha = keyframeExprs(clip, duration, time).op;
+    parts.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(${alpha})'`, "format=rgba");
+  } else if (opacity < 0.999) {
+    parts.push(`colorchannelmixer=aa=${opacity.toFixed(3)}`);
+  }
   const fadeIn = Math.max(0, Math.min(clip.fadeIn || 0, duration / 2));
   const fadeOut = Math.max(0, Math.min(clip.fadeOut || 0, duration / 2));
   if (fadeIn > 0.02) parts.push(`fade=t=in:st=0:d=${fadeIn.toFixed(3)}:alpha=1`);
   if (fadeOut > 0.02) parts.push(`fade=t=out:st=${(duration - fadeOut).toFixed(3)}:d=${fadeOut.toFixed(3)}:alpha=1`);
-  if (clip.rotation) parts.push(`rotate=${((clip.rotation * Math.PI) / 180).toFixed(6)}:c=none:ow=rotw(iw):oh=roth(ih)`);
+
+  // Rotation : fixe, ou animée avec une boîte assez grande pour tous les angles
+  // (une boîte calculée image par image rognerait les coins aux angles extrêmes).
+  const rotation = Number(keys ? keys.first.rotation : clip.rotation) || 0;
+  if (keys?.varies.rot) {
+    const maxAngle = Math.max(...(clip.keys || []).map((key) => Math.abs(Number(key.rotation) || 0)), 1);
+    const maxRad = ((Math.max(maxAngle, Math.abs(rotation)) * Math.PI) / 180).toFixed(6);
+    parts.push(`rotate='(${keys.rot})*PI/180':c=none:ow='rotw(${maxRad})':oh='roth(${maxRad})'`);
+  } else if (rotation) {
+    parts.push(`rotate=${((rotation * Math.PI) / 180).toFixed(6)}:c=none:ow=rotw(iw):oh=roth(ih)`);
+  }
+
+  if (keys) {
+    if (keys.varies.size) {
+      parts.push(
+        `scale=w='2*ceil((${keys.wf})*${out.width}/2)':h='2*ceil((${keys.hf})*${out.height}/2)':eval=frame`
+      );
+    }
+    // Le centre et la taille sont évalués à chaque image : `w`/`h` sont la taille
+    // courante de l'incrustation, donc la rotation reste centrée sur la case.
+    return {
+      chain: parts.join(","),
+      position: `x='(${keys.cx})*W-w/2':y='(${keys.cy})*H-h/2'`,
+    };
+  }
 
   const exprs = motionExprs(clip.motion, clip.box, duration);
   if (exprs.scale !== "1") {
@@ -860,7 +943,7 @@ export async function renderMontage(
 
   // Calques d'incrustation (Vidéo 2, 3…) : vidéo/image par-dessus la piste principale.
   const layers = (project.overlayLayers || []).filter((layer) => !layer.hidden);
-  const overlayInputs: { index: number; clip: OverlayClip }[] = [];
+  const overlayInputs: { index: number; clip: OverlayClip; source: Source }[] = [];
   for (const layer of layers) {
     for (const clip of [...layer.clips].sort((a, b) => a.start - b.start)) {
       if (!(clip.duration > 0.02)) continue;
@@ -872,7 +955,7 @@ export async function renderMontage(
       } else {
         argv.push("-loop", "1", "-framerate", String(fps), "-t", clip.duration.toFixed(3), "-i", file);
       }
-      overlayInputs.push({ index: inputIndex++, clip });
+      overlayInputs.push({ index: inputIndex++, clip, source });
       // Bande son de la vidéo incrustée (coupée par défaut).
       if (source.kind === "video" && clip.audio && clip.audio.mute === false) {
         argv.push("-ss", Math.max(0, clip.offset).toFixed(3), "-t", clip.duration.toFixed(3), "-i", file);
@@ -919,7 +1002,7 @@ export async function renderMontage(
 
   // Incrustations : empilées après la piste principale, dans l'ordre des calques.
   for (const overlay of overlayInputs) {
-    const { chain, position } = overlayChain(overlay.clip, overlay.clip.duration, { width: W, height: H });
+    const { chain, position } = overlayChain(overlay.clip, overlay.clip.duration, { width: W, height: H, fps }, overlay.source.chroma);
     filters.push(`[${overlay.index}:v]${chain}[ov${vIndex}]`);
     const outLabel = `vo${vIndex}`;
     const end = overlay.clip.start + overlay.clip.duration;

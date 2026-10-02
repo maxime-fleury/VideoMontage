@@ -8,7 +8,14 @@
  *
  * Supporte : nombres, + - * / %, parenthèses, moins unaire, comparaisons simples,
  * et les fonctions min, max, abs, floor, ceil, round, sin, cos, sqrt, if.
+ *
+ * Les comparaisons existent en deux formes : les opérateurs `<`, `>`, `<=`, `>=`
+ * et les fonctions `lt`, `gt`, `lte`, `gte`, `eq` de ffmpeg. Les expressions
+ * partagées (images clés) utilisent les fonctions : les opérateurs cassent le
+ * parseur d'expressions de ffmpeg.
  */
+
+const cmp = (fn) => (a, b) => (fn(a, b) ? 1 : 0);
 
 const FUNCTIONS = {
   min: Math.min,
@@ -20,6 +27,11 @@ const FUNCTIONS = {
   sin: Math.sin,
   cos: Math.cos,
   sqrt: Math.sqrt,
+  lt: cmp((a, b) => a < b),
+  gt: cmp((a, b) => a > b),
+  lte: cmp((a, b) => a <= b),
+  gte: cmp((a, b) => a >= b),
+  eq: cmp((a, b) => a === b),
 };
 
 const CONSTANTS = { PI: Math.PI, E: Math.E };

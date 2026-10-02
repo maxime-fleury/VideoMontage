@@ -313,6 +313,23 @@ export function openSubtitlesModal() {
       field("Tout en majuscules", uppercase),
       field("Bandeau de fond", background),
       el("div", { class: "muted", style: { fontSize: "11px", marginTop: "8px" }, text: "L'aperçu en direct s'affiche dans la scène (en haut à gauche) à la position de la tête de lecture." }),
+      el("div", { class: "divider" }),
+      el("div", { class: "panel-title", text: "⬇️ Fichiers de sous-titres" }),
+      el("div", {
+        class: "muted",
+        style: { fontSize: "11px", marginBottom: "6px" },
+        text: S.subtitleLines?.length
+          ? "Mêmes phrases et mêmes coupures que les sous-titres incrustés, prêts pour YouTube, Premiere ou DaVinci."
+          : "Vide tant que la transcription n'a pas été lancée (🗣️ Transcrire).",
+      }),
+      el("div", { class: "panel-actions" }, [
+        el("a", { href: `/api/projects/${S.project.id}/subtitles.srt`, download: "", style: { textDecoration: "none" } }, [
+          el("button", { text: "⤓ .srt", title: "Sous-titres SubRip (timecodes à la virgule)" }),
+        ]),
+        el("a", { href: `/api/projects/${S.project.id}/subtitles.vtt`, download: "", style: { textDecoration: "none" } }, [
+          el("button", { text: "⤓ .vtt", title: "WebVTT (timecodes au point)" }),
+        ]),
+      ]),
       el("div", { class: "footer" }, [
         el("button", { text: "Fermer", onclick: () => close?.() }),
         el("button", {
